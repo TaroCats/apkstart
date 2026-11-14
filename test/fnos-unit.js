@@ -585,7 +585,13 @@ test('只有裸二进制时造 .xkbbin/xkbcomp 软链 shim（否则 -xkbdir 也�
   assertEqual(root, expectedRoot, '返回可直接当 cwd 的目录');
   // 目标在 macOS 上不存在，属悬空软链，只能 lstat（existsSync 对悬空链接返回 false）
   assert(fs.lstatSync(path.join(root, '.xkbbin', 'xkbcomp')).isSymbolicLink(), '软链必须落在 <cwd>/.xkbbin/xkbcomp');
-  assertEqual(fs.readlinkSync(path.join(root, '.xkbbin', 'xkbcomp')), '/usr/bin/xkbcomp');
+  // Windows 创建软链时会把目标规范化为「盘符 + 反斜杠」形式（/usr/bin/xkbcomp →
+  // D:\usr\bin\xkbcomp），所以比前缀、比反斜杠都会挂。归一化到 POSIX 再比：
+  // 这里验的是「链到哪一个文件」，不是「文件系统怎么存这个字符串」。
+  const linked = fs.readlinkSync(path.join(root, '.xkbbin', 'xkbcomp'))
+    .replace(/^[A-Za-z]:/, '')
+    .replace(/\\/g, '/');
+  assertEqual(linked, '/usr/bin/xkbcomp', '软链指向宿主 xkbcomp');
   // 幂等：再调一次不该抛错
   assertEqual(ensureXkbRoot(bin, tmp, (p) => p === '/usr/bin/xkbcomp'), root);
   // 连 xkbcomp 都没有时返回空串（保持原 cwd，让 fatal 暴露而不是假装成功）
