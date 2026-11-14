@@ -1,0 +1,73 @@
+sequenceDiagram
+  participant UI as ui/app.js
+  participant API as api/runtime.js
+  participant P as service/provision.js
+  participant NET as dl.google.com
+  participant FS as TRIM_APPDATA/runtime
+  participant K as service/kvm.js
+
+  UI->>API: POST /api/runtime/deploy
+  API->>P: deploy({force})
+  P-->>API: {taskId, state:"running"}
+  API-->>UI: 200 {taskId}
+  loop platform-tools / emulator / system-image
+    P->>NET: GET URL (Range: bytes=已下载)
+    NET-->>P: 206/200 分片流
+    P->>FS: 写入 downloads/<name>.part
+    P->>P: emit progress{phase,percent,speedBps}
+  end
+  P->>P: SHA256 校验（PROVISION_MANIFEST）
+  P->>FS: 解压 zip → platform-tools/ emulator/ system-images/
+  P->>K: checkKvmAccess()
+  K-->>P: {available,writable,group}
+  P->>P: 写 runtime/.deployed 标记
+  P-->>UI: (轮询 progress) {phase:"idle",done:true}
+  UI->>API: GET /api/runtime/status
+  API-->>UI: {deployed:true, kvm:{writable:false}}
+  UI-->>UI: kvm.writable=false 显示「无硬件加速，降级模式」
+
+  Note over UI,Q: —— 启动模拟器 ——
+  participant Q as emulator/qemu
+  participant E as service/emulator.js
+  participant A as core/adb.js
+  UI->>API: POST /api/emulator/start
+  API->>E: start()
+  alt 已 running
+    E-->>API: CONFLICT
+  end
+  E->>E: ensureAvd()（avdmanager 缺失则手写 config.ini）
+  E->>E: checkKvm → accel=on|off
+  E->>Q: spawn emulator -avd apkstart -no-window -no-audio -gpu swiftshader_indirect -accel on -port 5554
+  E->>A: new AdbClient({serial:"127.0.0.1:5554"})
+  E->>A: wait-for-device
+  loop 每 1s 至 180s
+    E->>A: shell getprop sys.boot_completed
+    A-->>E: "1"
+  end
+  E->>E: state=running, bootMs=…
+  E-->>API: {status:"running"}
+  API-->>UI: 200 {status:"starting"}
+
+  Note over UI,ST: —— 安装并启动 APK ——
+  participant INS as service/installer.js
+  participant ST as service/store.js
+  UI->>API: POST /api/apk/parse (file)
+  API->>API: parseApk(tmp) → ApkVO(abis,armOnly)
+  API-->>UI: ApkVO
+  alt armOnly 且镜像无 native bridge
+    UI-->>UI: 提示「仅 ARM，可能不兼容」
+  end
+  UI->>API: POST /api/apps/install {uploadId}
+  API->>INS: install(uploadId)
+  INS->>A: install -r <apk>
+  alt INSTALL_FAILED_NO_MATCHING_ABIS
+    A-->>INS: AdbError(friendlyInstallError)
+    INS-->>API: UNSUPPORTED 中文
+    API-->>UI: 422
+  else 成功
+    INS->>A: resolveLauncher(pkg) / startApp(pkg, activity)
+    INS->>A: waitAppAlive(pkg)（存活观察+闪退重试）
+    INS->>ST: upsertApp(app + installedAt)
+    INS-->>API: AppVO
+    API-->>UI: 201 AppVO
+  end

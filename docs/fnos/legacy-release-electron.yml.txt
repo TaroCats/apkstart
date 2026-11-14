@@ -1,0 +1,119 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: 构建便携版并发布
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: 安装依赖（含 Electron 运行时）
+        run: npm ci
+        env:
+          ELECTRON_MIRROR: https://npmmirror.com/mirrors/electron/
+
+      - name: 测试
+        run: npm test
+
+      - name: 打包便携版
+        run: npm run pack
+
+      - name: 压缩产物
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          if (-not $tag.StartsWith('v')) { $tag = "v$tag" }
+          Compress-Archive -Path dist/ApkStart-win64-portable/* -DestinationPath "ApkStart-$tag-win64-portable.zip" -CompressionLevel Optimal
+          Get-Item "ApkStart-$tag-win64-portable.zip" | Select-Object Name, Length
+
+      # 创建 Release 并上传轻量便携版（壳层极小，运行时首次启动按需下载）
+      - name: 创建 Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          if (-not $tag.StartsWith('v')) { $tag = "v$tag" }
+          $zip = "ApkStart-$tag-win64-portable.zip"
+          # 幂等：release 已存在（如重跑 / 重推 tag）就跳过 create，只上传资产
+          $existing = gh release view $tag --json tagName -q .tagName 2>$null
+          if (-not $existing) {
+            gh release create $tag --title "ApkStart $tag" --generate-notes
+            if ($LASTEXITCODE -ne 0) { exit 1 }
+          }
+          $ok = $false
+          for ($i = 1; $i -le 3 -and -not $ok; $i++) {
+            gh release upload $tag $zip --clobber
+            if ($LASTEXITCODE -eq 0) { $ok = $true } else { Start-Sleep -Seconds 15 }
+          }
+          if (-not $ok) { Write-Error "上传失败: $zip"; exit 1 }
+          gh release view $tag --json assets --jq '.assets[].name'
+
+  full:
+    name: 构建完整版（内置运行时，离线开箱即用）
+    runs-on: windows-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: 安装依赖
+        run: npm ci
+        env:
+          ELECTRON_MIRROR: https://npmmirror.com/mirrors/electron/
+
+      # 从 Google 官方源组装运行时（emulator + platform-tools + aehd + Play x86_64 镜像）。
+      # 输出到 engine/，与本地开发时的目录结构一致。
+      - name: 组装运行时
+        run: node build/fetch-runtime.js engine
+
+      # prepare-runtime 会把 system.img/vendor.img 压成 xz(LZMA2)。
+      # CI runner 只有 2 核：XZ_PRESET=6 把压缩时间从 ~2h 降到 ~40min（体积 +3%）。
+      # XZ_TIMEOUT_MS 是看门狗：超时自动 kill 并落 gzip 兜底，
+      # 绝不重演「stdin 没接 EOF → 0 字节输出 → 挂死 3 小时」。
+      - name: 准备运行时（xz 压缩，CI 降档加速）
+        run: node build/prepare-runtime.js --force
+        env:
+          XZ_PRESET: '6'
+          XZ_TIMEOUT_MS: '3600000'
+
+      - name: 构建完整版安装包
+        run: npx electron-builder --win nsis
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+
+      - name: 上传完整版到 Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          if (-not $tag.StartsWith('v')) { $tag = "v$tag" }
+          $setup = Get-ChildItem dist/release/*Setup.exe | Select-Object -First 1
+          if (-not $setup) { Write-Error "未找到 Setup.exe"; exit 1 }
+          Write-Output ("上传 {0} ({1:N0} MB)" -f $setup.Name, ($setup.Length / 1MB))
+          $ok = $false
+          for ($i = 1; $i -le 3 -and -not $ok; $i++) {
+            gh release upload $tag $setup.FullName --clobber
+            if ($LASTEXITCODE -eq 0) { $ok = $true } else { Start-Sleep -Seconds 20 }
+          }
+          if (-not $ok) { Write-Error "上传失败: $($setup.Name)"; exit 1 }
+          gh release view $tag --json assets --jq '.assets[] | "\(.name) \(.size)"'

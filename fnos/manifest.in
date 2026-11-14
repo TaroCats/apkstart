@@ -1,0 +1,17 @@
+appname=apkstart-fnos
+version=@VERSION@
+display_name=ApkStart
+desc=在飞牛 NAS 上通过 KVM 无头模拟器托管安卓应用（Web 控制台）
+changelog=初始 fnOS 移植版本
+platform=x86
+source=thirdparty
+maintainer=RoutineMiku
+maintainer_url=https://github.com/RoutineMiku
+distributor=TaroCats
+distributor_url=https://github.com/TaroCats
+desktop_uidir=ui
+desktop_applaunchname=apkstart-fnos.main
+ctl_stop=true
+checksum=@CHECKSUM@
+checkport=false
+disable_authorization_path=true

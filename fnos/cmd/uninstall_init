@@ -1,0 +1,30 @@
+#!/bin/sh
+# =============================================================================
+# 卸载前（ARCH §6.2）：先停服务，再关模拟器、清理残留进程。
+# =============================================================================
+set -u
+
+APPDEST="${TRIM_APPDEST:-}"
+DATA_ROOT="${TRIM_PKGVAR:-${TRIM_APPDATA:-$HOME/.apkstart}}"
+LOG_FILE="${TRIM_TEMP_LOGFILE:-$DATA_ROOT/uninstall.log}"
+
+log() { echo "[uninstall_init] $*" | tee -a "$LOG_FILE" >/dev/null 2>&1 || echo "[uninstall_init] $*"; }
+
+# 调用 cmd/main stop（相对本脚本所在目录）
+MAIN_BIN="$(dirname "$0")/main"
+if [ -x "$MAIN_BIN" ]; then
+  log "执行 cmd/main stop"
+  TRIM_APPDEST="$APPDEST" TRIM_PKGVAR="$DATA_ROOT" "$MAIN_BIN" stop 2>/dev/null || true
+fi
+
+# 兜底强杀
+pkill -f "${DATA_ROOT}/runtime/emulator/emulator" 2>/dev/null || true
+pkill -f "qemu-system-x86_64.*${DATA_ROOT}" 2>/dev/null || true
+if [ -f "$DATA_ROOT/service.pid" ]; then
+  p="$(cat "$DATA_ROOT/service.pid" 2>/dev/null | tr -d '[:space:]')"
+  [ -n "$p" ] && kill -KILL "$p" 2>/dev/null || true
+  rm -f "$DATA_ROOT/service.pid" 2>/dev/null || true
+fi
+
+log "卸载前清理完成"
+exit 0

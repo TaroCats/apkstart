@@ -1,0 +1,195 @@
+#!/bin/sh
+# =============================================================================
+# ApkStart 服务生命周期（ARCH §6.1 / §10-2 / §10-3）
+#   start  : 解析 node → 后台启动 server/index.js → 轮询 /api/health 200（最多 20s）→ exit 0
+#   stop   : SIGTERM → 等待 → SIGKILL；并 adb emu kill + 清理模拟器残留
+#   status : 运行中 exit 0，未运行 exit 3
+# 幂等：已运行且健康 → 直接 exit 0；已运行但不健康 → 清理后重启。
+# 数据根：TRIM_PKGVAR（次选 TRIM_APPDATA，本地回退 $HOME/.apkstart）。
+# =============================================================================
+set -u
+
+# ---------- 路径解析 ----------
+APPDEST="${TRIM_APPDEST:-}"
+DATA_ROOT="${TRIM_PKGVAR:-${TRIM_APPDATA:-$HOME/.apkstart}}"
+LOG_DIR="$DATA_ROOT/logs"
+PID_FILE="$DATA_ROOT/service.pid"
+LOG_FILE="$LOG_DIR/service.log"
+PORT="${TRIM_SERVICE_PORT:-8890}"
+HEALTH_TIMEOUT=20   # 秒
+HEALTH_INTERVAL=1
+
+mkdir -p "$LOG_DIR"
+
+log() {
+  msg="[$(date '+%Y-%m-%dT%H:%M:%S%z')] $*"
+  echo "$msg" >> "$LOG_FILE" 2>/dev/null || true
+  [ -n "${TRIM_TEMP_LOGFILE:-}" ] && echo "$msg" >> "$TRIM_TEMP_LOGFILE" 2>/dev/null || true
+}
+
+# ---------- Node 运行时解析（ARCH §5.0） ----------
+resolve_node() {
+  for c in "${NODE_BIN:-}" /usr/local/bin/node "$(command -v node 2>/dev/null)" /var/apps/nodejs*/target/bin/node; do
+    [ -n "$c" ] && [ -x "$c" ] && { echo "$c"; return 0; }
+  done
+  echo '未找到 Node.js 运行时。请在飞牛应用中心安装官方「Node.js」应用，或设置 NODE_BIN 环境变量。' >&2
+  return 1
+}
+
+# ---------- 进程存活 ----------
+pid_alive() {
+  pid="$1"
+  [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null
+}
+
+read_pid() {
+  [ -f "$PID_FILE" ] && cat "$PID_FILE" 2>/dev/null | tr -d '[:space:]'
+}
+
+# ---------- 健康检查（用 node 自身，避免依赖 curl） ----------
+# 只看状态码是不够的：目标机上 8890 曾被第三方服务（uvicorn）占用，其 /api/health
+# 同样返回 200，导致「别人的服务」被当成自己启动成功（假成功）。因此必须校验响应体：
+#   ① statusCode === 200
+#   ② body.app === 'apkstart-fnos'
+#   ③ body.pid 存在且 等于 $PID_FILE 中的 pid（防止上一次残留实例被误认）
+health_ok() {
+  [ -n "${NODE:-}" ] || return 1
+  HK_PORT="$PORT" HK_SOCK="${LISTEN_SOCKET:-}" HK_PID="$(read_pid)" "$NODE" -e '
+    const http = require("http");
+    const wantPid = Number(process.env.HK_PID) || 0;
+    const opts = process.env.HK_SOCK
+      ? { socketPath: process.env.HK_SOCK, path: "/api/health", timeout: 1500 }
+      : { host: "127.0.0.1", port: Number(process.env.HK_PORT) || 8890, path: "/api/health", timeout: 1500 };
+    const req = http.get(opts, (res) => {
+      if (res.statusCode !== 200) { res.resume(); return process.exit(1); }
+      let body = "";
+      res.setEncoding("utf8");
+      res.on("data", (c) => {
+        body += c;
+        if (body.length > 65536) { req.destroy(); process.exit(1); }
+      });
+      res.on("end", () => {
+        let info;
+        try { info = JSON.parse(body); } catch (_) { return process.exit(1); }
+        if (!info || info.app !== "apkstart-fnos") return process.exit(1);
+        if (!info.pid || Number(info.pid) !== wantPid) return process.exit(1);
+        process.exit(0);
+      });
+    });
+    req.on("error", () => process.exit(1));
+    req.on("timeout", () => { req.destroy(); process.exit(1); });
+  ' >/dev/null 2>&1
+}
+
+# ---------- 停止实现 ----------
+do_stop() {
+  pid="$(read_pid)"
+  if pid_alive "$pid"; then
+    log "停止服务 pid=$pid (SIGTERM)"
+    kill -TERM "$pid" 2>/dev/null || true
+    i=0
+    while pid_alive "$pid" && [ "$i" -lt 15 ]; do
+      sleep 1; i=$((i + 1))
+    done
+    if pid_alive "$pid"; then
+      log "SIGTERM 超时，强制 SIGKILL pid=$pid"
+      kill -KILL "$pid" 2>/dev/null || true
+    fi
+  fi
+  rm -f "$PID_FILE" 2>/dev/null || true
+
+  # 关闭模拟器：优先经 adb，兜底直接杀进程
+  # serial 用 adb server 内的设备名 emulator-5554（不是 127.0.0.1:5554：
+  # 5554 是 console 端口，adb 走 5555，写 IP:5554 会永远 not found —— 真机实测）
+  ADB_BIN="$APPDEST/runtime/platform-tools/adb"
+  if [ -x "$ADB_BIN" ]; then
+    ANDROID_ADB_SERVER_PORT="${ANDROID_ADB_SERVER_PORT:-5044}" "$ADB_BIN" -s "emulator-5554" emu kill 2>/dev/null || true
+  fi
+  pkill -f "${DATA_ROOT}/runtime/emulator/emulator" 2>/dev/null || true
+  pkill -f "qemu-system-x86_64.*${DATA_ROOT}" 2>/dev/null || true
+  return 0
+}
+
+# ---------- 启动实现 ----------
+do_start() {
+  NODE="$(resolve_node)" || { log "resolve_node 失败"; return 1; }
+  export NODE
+
+  # 幂等：已运行
+  pid="$(read_pid)"
+  if pid_alive "$pid"; then
+    if health_ok; then
+      log "已在运行且健康 pid=${pid}，直接返回"
+      return 0
+    fi
+    log "进程存活但健康检查失败 pid=${pid}，清理后重启"
+    do_stop
+  fi
+
+  SERVER_JS="${APPDEST}/server/index.js"
+  if [ ! -f "$SERVER_JS" ]; then
+    log "未找到服务入口: $SERVER_JS"
+    echo "未找到服务入口: $SERVER_JS" >&2
+    return 1
+  fi
+
+  log "启动 node=$NODE server=$SERVER_JS port=$PORT"
+  # 传关键 TRIM_* 给子进程；nohup 脱离会话
+  TRIM_PKGVAR="$DATA_ROOT" TRIM_APPDEST="$APPDEST" TRIM_SERVICE_PORT="$PORT" \
+    nohup "$NODE" "$SERVER_JS" >> "$LOG_FILE" 2>&1 &
+  newpid=$!
+  echo "$newpid" > "$PID_FILE"
+  log "已拉起源码进程 pid=${newpid}，等待健康检查（最多 ${HEALTH_TIMEOUT}s）"
+
+  i=0
+  while [ "$i" -lt "$HEALTH_TIMEOUT" ]; do
+    if health_ok; then
+      log "健康检查通过，启动成功 pid=$newpid"
+      return 0
+    fi
+    if ! pid_alive "$newpid"; then
+      # 进程已退出：通常是端口被占用 / 代码异常。立即失败并回显日志尾部，
+      # 让调用方（fnOS 安装器 / 运维）第一屏就能看到真正原因。
+      log "进程已退出，启动失败（健康检查未通过）"
+      wait "$newpid" 2>/dev/null || true   # 回收子进程，避免 "Killed: 9" 噪声
+      rm -f "$PID_FILE" 2>/dev/null || true
+      {
+        echo "ApkStart 启动失败：服务进程已退出，健康检查未通过。下面是日志尾部（${LOG_FILE}）："
+        tail -n 20 "$LOG_FILE" 1>&2 2>/dev/null || true
+      } >&2
+      return 1
+    fi
+    sleep "$HEALTH_INTERVAL"
+    i=$((i + 1))
+  done
+
+  log "健康检查在 ${HEALTH_TIMEOUT}s 内未通过，终止并清理"
+  kill -KILL "$newpid" 2>/dev/null || true
+  wait "$newpid" 2>/dev/null || true   # 回收子进程，避免 shell 打印 "Killed: 9" 噪声
+  rm -f "$PID_FILE" 2>/dev/null || true
+  {
+    echo "服务启动后健康检查未通过（${HEALTH_TIMEOUT}s），请查看日志: ${LOG_FILE}"
+    tail -n 20 "$LOG_FILE" 1>&2 2>/dev/null || true
+  } >&2
+  return 1
+}
+
+# ---------- 分发 ----------
+CMD="${1:-}"
+case "$CMD" in
+  start)  do_start; exit $? ;;
+  stop)   do_stop;  exit 0 ;;
+  status)
+    NODE="$(resolve_node 2>/dev/null || true)"
+    export NODE
+    pid="$(read_pid)"
+    if pid_alive "$pid"; then
+      exit 0
+    fi
+    exit 3
+    ;;
+  *)
+    echo "用法: $0 {start|stop|status}" >&2
+    exit 1
+    ;;
+esac

@@ -1,0 +1,25 @@
+#!/bin/sh
+# =============================================================================
+# 卸载后（ARCH §6.2 / P1-9 扩展位）：
+#   默认保留用户数据（apps.json/settings.json），
+#   可选删除运行时/AVD：设置 TRIM_UNINSTALL_PURGE=1 或 wizard 传入 purge=true。
+# =============================================================================
+set -u
+
+DATA_ROOT="${TRIM_PKGVAR:-${TRIM_APPDATA:-$HOME/.apkstart}}"
+LOG_FILE="${TRIM_TEMP_LOGFILE:-$DATA_ROOT/uninstall.log}"
+PURGE="${TRIM_UNINSTALL_PURGE:-0}"
+
+log() { echo "[uninstall_callback] $*" | tee -a "$LOG_FILE" >/dev/null 2>&1 || echo "[uninstall_callback] $*"; }
+
+if [ "$PURGE" = "1" ] || [ "$PURGE" = "true" ]; then
+  log "purge 已启用，删除 runtime/avd/downloads/uploads"
+  rm -rf "$DATA_ROOT/runtime" "$DATA_ROOT/avd" "$DATA_ROOT/downloads" "$DATA_ROOT/uploads" 2>/dev/null || true
+else
+  log "保留 runtime/avd（如需清除请设置 TRIM_UNINSTALL_PURGE=1）"
+fi
+
+# 清理临时 pid / 首启标记
+rm -f "$DATA_ROOT/service.pid" "$DATA_ROOT/first_run.json" 2>/dev/null || true
+log "卸载后清理完成"
+exit 0

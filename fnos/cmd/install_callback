@@ -1,0 +1,20 @@
+#!/bin/sh
+# =============================================================================
+# 安装回调（ARCH §6.2）：首次部署引导信息落盘，供 UI 首屏读取。
+# =============================================================================
+set -u
+
+DATA_ROOT="${TRIM_PKGVAR:-${TRIM_APPDATA:-$HOME/.apkstart}}"
+LOG_FILE="${TRIM_TEMP_LOGFILE:-$DATA_ROOT/install.log}"
+
+log() { echo "[install_callback] $*" | tee -a "$LOG_FILE" >/dev/null 2>&1 || echo "[install_callback] $*"; }
+
+mkdir -p "$DATA_ROOT" 2>/dev/null || true
+cat > "$DATA_ROOT/first_run.json" <<'JSON'
+{
+  "needDeploy": true,
+  "message": "首次使用请在 Web 控制台点击“在线部署”下载运行时，再启动模拟器。"
+}
+JSON
+log "已写入首次部署引导 first_run.json"
+exit 0

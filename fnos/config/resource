@@ -1,0 +1,5 @@
+{
+  "port": 8890,
+  "memory_mb": 4096,
+  "description": "KVM 无头 Android 运行时"
+}

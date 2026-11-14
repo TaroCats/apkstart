@@ -27,3 +27,7 @@ engine/*.img
 engine/*.qcow2
 tools/platform-tools/adb.exe
 tools/platform-tools/*.dll
+
+# fnOS 打包产物
+build/stage/
+*.fpk

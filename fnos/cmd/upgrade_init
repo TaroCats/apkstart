@@ -1,0 +1,67 @@
+#!/bin/sh
+# =============================================================================
+# 升级前处理（fnOS 生命周期脚本，与 fndepot / wechat-on-cloud 的 cmd/ 契约一致）
+#
+# 行为：
+#   1) 若服务在运行 → 调用 cmd/main stop 优雅停止（含 adb emu kill + 模拟器残留清理）
+#   2) 备份 settings.json → ${TRIM_PKGVAR}/settings.json.bak（供 upgrade_callback 失败回滚）
+#   3) 清理临时文件：残留 PID、上传暂存（uploads/）、未完成的下载分片（downloads/*.part）
+#   4) 绝不动 runtime/ —— 其中是 3 个组件共约 1.9GB 的已解压运行时，重下代价过高；
+#      runtime/.deployed 标记也必须保留，否则升级后会被判定为「未部署」而重新下载。
+#
+# 幂等：任何一步缺失都当作「无需处理」，始终 exit 0（升级流程不应因清理失败而中断）。
+# =============================================================================
+set -u
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+DATA_ROOT="${TRIM_PKGVAR:-${TRIM_APPDATA:-$HOME/.apkstart}}"
+LOG_FILE="${TRIM_TEMP_LOGFILE:-$DATA_ROOT/logs/upgrade.log}"
+
+mkdir -p "$DATA_ROOT/logs" 2>/dev/null || true
+
+log() {
+  msg="[$(date '+%Y-%m-%dT%H:%M:%S%z')] [upgrade_init] $*"
+  echo "$msg" >> "$LOG_FILE" 2>/dev/null || echo "$msg"
+}
+
+log "升级前处理开始，数据根=$DATA_ROOT"
+
+# ---------- 1) 停止服务 ----------
+if [ -x "$SCRIPT_DIR/main" ]; then
+  if "$SCRIPT_DIR/main" status >/dev/null 2>&1; then
+    log "检测到服务在运行，执行 cmd/main stop"
+    "$SCRIPT_DIR/main" stop >/dev/null 2>&1 || log "cmd/main stop 返回非 0（忽略，继续升级）"
+    log "服务已停止"
+  else
+    log "服务未运行，跳过停止"
+  fi
+else
+  log "未找到 cmd/main，跳过停止"
+fi
+
+# ---------- 2) 备份 settings.json ----------
+if [ -f "$DATA_ROOT/settings.json" ]; then
+  if cp "$DATA_ROOT/settings.json" "$DATA_ROOT/settings.json.bak" 2>/dev/null; then
+    log "已备份 settings.json → settings.json.bak"
+  else
+    log "备份 settings.json 失败（忽略）"
+  fi
+else
+  log "无 settings.json（首次安装或已被清理），跳过备份"
+fi
+
+# ---------- 3) 清理临时文件（保留 runtime/ 与 runtime/.deployed） ----------
+rm -f "$DATA_ROOT/service.pid" 2>/dev/null || true
+rm -rf "$DATA_ROOT/uploads" 2>/dev/null || true
+mkdir -p "$DATA_ROOT/uploads" 2>/dev/null || true
+find "$DATA_ROOT/downloads" -maxdepth 1 -name '*.part' -type f -delete 2>/dev/null || true
+find "$DATA_ROOT" -maxdepth 1 -name '*.tmp' -type f -delete 2>/dev/null || true
+
+if [ -f "$DATA_ROOT/runtime/.deployed" ]; then
+  log "保留 runtime/ 与 .deployed 标记（跳过重新下载）"
+else
+  log "runtime/.deployed 不存在，升级后需重新部署运行时"
+fi
+
+log "升级前处理完成"
+exit 0

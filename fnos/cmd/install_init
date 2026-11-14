@@ -1,0 +1,54 @@
+#!/bin/sh
+# =============================================================================
+# 安装初始化（ARCH §6.2）：按 TRIM_* 建数据目录、置权限，属主由 fnOS 以 package 身份保证。
+# 幂等：目录已存在则复用，不覆盖已有 apps.json / settings.json。
+# =============================================================================
+set -u
+
+DATA_ROOT="${TRIM_PKGVAR:-${TRIM_APPDATA:-$HOME/.apkstart}}"
+APPDEST="${TRIM_APPDEST:-}"
+LOG_FILE="${TRIM_TEMP_LOGFILE:-$DATA_ROOT/install.log}"
+
+log() { echo "[install_init] $*" | tee -a "$LOG_FILE" >/dev/null 2>&1 || echo "[install_init] $*"; }
+
+log "数据根: $DATA_ROOT"
+
+# 持久数据目录
+for d in runtime avd shared icons logs downloads uploads; do
+  mkdir -p "$DATA_ROOT/$d" && log "mkdir $DATA_ROOT/$d"
+done
+chmod 0755 "$DATA_ROOT" 2>/dev/null || true
+
+# 默认数据文件（不覆盖已存在）
+if [ ! -f "$DATA_ROOT/apps.json" ]; then
+  printf '{"apps":[]}\n' > "$DATA_ROOT/apps.json"
+  log "初始化 apps.json"
+fi
+if [ ! -f "$DATA_ROOT/settings.json" ]; then
+  cat > "$DATA_ROOT/settings.json" <<'JSON'
+{
+  "port": 8890,
+  "screen": { "fps": 2, "maxWidth": 720 },
+  "emulator": {
+    "name": "apkstart",
+    "apiLevel": 34,
+    "imageTag": "google_apis",
+    "abi": "x86_64",
+    "memoryMB": 2048,
+    "cores": 2,
+    "gpu": "swiftshader_indirect",
+    "idleShutdownMinutes": 0
+  },
+  "runtime": { "baseUrl": "https://dl.google.com/android/repository" }
+}
+JSON
+  log "初始化 settings.json"
+fi
+
+# 可执行位（cmd）
+if [ -n "$APPDEST" ] && [ -d "$APPDEST/../cmd" ]; then
+  chmod 0755 "$APPDEST/../cmd/"* 2>/dev/null || true
+fi
+
+log "安装初始化完成"
+exit 0

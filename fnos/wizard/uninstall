@@ -1,0 +1,12 @@
+{
+  "title": "ApkStart 卸载选项",
+  "description": "是否一并删除已下载的运行时与模拟器数据（runtime / avd）。",
+  "fields": [
+    {
+      "key": "purge",
+      "type": "boolean",
+      "label": "同时删除运行时与模拟器数据（不可恢复）",
+      "default": false
+    }
+  ]
+}

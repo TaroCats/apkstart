@@ -1,0 +1,85 @@
+classDiagram
+  class Paths {
+    +APPDEST: string
+    +APPDATA: string
+    +APPTEMP: string
+    +APPHOME: string
+    +RUNTIME: string
+    +AVD: string
+    +ensureDirs()
+  }
+  class Store {
+    +getApps() App[]
+    +upsertApp(app) App
+    +removeApp(pkg)
+    +getSettings() Settings
+    +saveSettings(patch) Settings
+  }
+  class KvmChecker {
+    +checkKvmAccess() KvmInfo
+  }
+  class Provision {
+    +deploy(opts) TaskId
+    +progress() ProgressVO
+    +status() RuntimeStatusVO
+  }
+  class EmulatorManager {
+    +state: string
+    +start(opts)
+    +stop()
+    +status() StatusVO
+    +logs(n) string[]
+    +ensureAvd()
+    -buildArgs()
+  }
+  class Engine {
+    +init()
+    +status() StatusVO
+    +ensureAdb()
+    +healthCheck()
+    +shutdown()
+  }
+  class Installer {
+    +install(uploadId) AppVO
+    +uninstall(pkg)
+    +startApp(pkg)
+  }
+  class AdbClient {
+    +adbPath: string
+    +serial: string
+    +static resolveAdb(explicit, appRoot) string
+    +exec(args, opts)
+    +install(apkPath)
+    +startApp(pkg, activity)
+    +screenshot() Buffer
+    +input(cmd)
+    +shell(cmd)
+    +wmSize()
+    +uninstall(pkg)
+  }
+  class ApkParser {
+    +parseApk(filePath) ApkInfo
+    +quickCheck(filePath) bool
+  }
+  class HttpServer {
+    +createServer()
+    +routes: Map
+  }
+
+  HttpServer --> Engine : 调用
+  HttpServer --> Provision
+  HttpServer --> EmulatorManager
+  HttpServer --> Installer
+  HttpServer --> Store
+  Engine --> EmulatorManager
+  Engine --> AdbClient
+  Engine --> Store
+  Provision --> KvmChecker
+  Provision --> Paths
+  EmulatorManager --> AdbClient
+  EmulatorManager --> KvmChecker
+  EmulatorManager --> Paths
+  Installer --> AdbClient
+  Installer --> ApkParser
+  Installer --> Store
+  Store --> Paths

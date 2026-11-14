@@ -1,0 +1,11 @@
+{
+  "title": "ApkStart 安装向导",
+  "description": "安装完成后，请在 Web 控制台点击「在线部署」下载 Android 运行时（platform-tools / emulator / 系统镜像）。",
+  "steps": [
+    {
+      "type": "info",
+      "title": "运行前须知",
+      "content": "本应用为在线包，不含运行时二进制。首次使用需联网下载约 1GB+ 组件。若无 /dev/kvm 权限，将自动降级为软件模拟（速度较慢）。"
+    }
+  ]
+}

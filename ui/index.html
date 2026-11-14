@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ApkStart · fnOS</title>
+  <link rel="icon" href="images/icon_64.png" type="image/png" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div id="app">
+    <!-- 顶部栏 -->
+    <header class="topbar">
+      <div class="brand">
+        <img class="brand-logo" src="images/icon_64.png" alt="ApkStart" width="32" height="32" />
+        <div class="brand-text">
+          <h1>ApkStart</h1>
+          <span class="brand-sub">飞牛 NAS · KVM 无头安卓运行时</span>
+        </div>
+      </div>
+      <div class="topbar-right">
+        <span id="version-badge" class="badge">v-</span>
+        <span id="conn-dot" class="conn-dot" title="后端连接状态"></span>
+      </div>
+    </header>
+
+    <!-- KVM 降级警告横幅 -->
+    <div id="kvm-warning" class="banner banner-warn hidden">
+      ⚠️ 当前环境无法读写 <code>/dev/kvm</code>，将以**软件模拟（-accel off）**降级运行，速度较慢。
+    </div>
+
+    <main class="layout">
+      <!-- 左列：状态 + 运行时 -->
+      <section class="col col-left">
+        <div class="card">
+          <div class="card-head"><h2>运行状态</h2></div>
+          <div class="card-body">
+            <div class="stat-grid">
+              <div class="stat">
+                <span class="stat-label">运行时</span>
+                <span id="st-runtime" class="stat-value">未知</span>
+              </div>
+              <div class="stat">
+                <span class="stat-label">模拟器</span>
+                <span id="st-emulator" class="stat-value">未知</span>
+              </div>
+              <div class="stat">
+                <span class="stat-label">ADB</span>
+                <span id="st-adb" class="stat-value">未知</span>
+              </div>
+              <div class="stat">
+                <span class="stat-label">前台应用</span>
+                <span id="st-foreground" class="stat-value">-</span>
+              </div>
+              <div class="stat">
+                <span class="stat-label">分辨率</span>
+                <span id="st-resolution" class="stat-value">-</span>
+              </div>
+              <div class="stat">
+                <span class="stat-label">内存占用</span>
+                <span id="st-rss" class="stat-value">-</span>
+              </div>
+            </div>
+            <div id="status-error" class="status-error hidden"></div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-head">
+            <h2>运行时部署</h2>
+            <button id="btn-deploy" class="btn btn-primary btn-sm">在线部署</button>
+          </div>
+          <div class="card-body">
+            <p class="hint">首次使用需下载 platform-tools / emulator / 系统镜像（约 1GB+）。支持断点续传与校验。</p>
+            <div id="deploy-progress-wrap" class="progress-wrap hidden">
+              <div class="progress">
+                <div id="deploy-bar" class="progress-bar" style="width:0%"></div>
+              </div>
+              <div class="progress-meta">
+                <span id="deploy-phase">准备中…</span>
+                <span id="deploy-percent">0%</span>
+              </div>
+              <div id="deploy-detail" class="progress-detail"></div>
+            </div>
+            <div class="row gap">
+              <button id="btn-emu-start" class="btn">启动模拟器</button>
+              <button id="btn-emu-stop" class="btn btn-ghost">停止</button>
+              <label class="checkbox"><input type="checkbox" id="chk-wipe" /> 清空数据启动</label>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><h2>安装 APK</h2></div>
+          <div class="card-body">
+            <div id="dropzone" class="dropzone">
+              <input type="file" id="file-input" accept=".apk,application/vnd.android.package-archive" hidden />
+              <div class="dz-icon">⬆</div>
+              <p>拖拽 APK 到此处，或<span class="link" id="dz-pick">点击选择文件</span></p>
+              <p class="dz-hint">仅支持 .apk（.apks/.xapk 暂不支持）</p>
+            </div>
+            <div id="apk-preview" class="apk-preview hidden"></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 中列：应用列表 -->
+      <section class="col col-mid">
+        <div class="card card-grow">
+          <div class="card-head">
+            <h2>已安装应用</h2>
+            <button id="btn-refresh-apps" class="btn btn-ghost btn-sm">刷新</button>
+          </div>
+          <div class="card-body">
+            <ul id="app-list" class="app-list">
+              <li class="empty">暂无应用，先上传并安装一个 APK 吧。</li>
+            </ul>
+          </div>
+        </div>
+      </section>
+
+      <!-- 右列：画面 -->
+      <section class="col col-right">
+        <div class="card card-grow">
+          <div class="card-head">
+            <h2>设备画面</h2>
+            <div class="screen-tools">
+              <button data-key="back" class="btn btn-ghost btn-sm" title="返回">◀ 返回</button>
+              <button data-key="home" class="btn btn-ghost btn-sm" title="主页">⌂ 主页</button>
+              <button data-key="recents" class="btn btn-ghost btn-sm" title="多任务">▤ 多任务</button>
+            </div>
+          </div>
+          <div class="card-body screen-body">
+            <div class="screen-frame">
+              <img id="screen-img" class="screen-img" alt="模拟器画面" />
+              <div id="screen-overlay" class="screen-overlay">模拟器未运行</div>
+            </div>
+            <form id="text-form" class="text-row">
+              <input type="text" id="text-input" placeholder="向设备输入文本（英文/数字）" autocomplete="off" />
+              <button type="submit" class="btn btn-sm">发送</button>
+            </form>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <!-- 日志抽屉 -->
+    <div id="log-drawer" class="log-drawer">
+      <button id="log-toggle" class="log-toggle">日志</button>
+      <div class="log-panel">
+        <pre id="log-content" class="log-content">（暂无日志）</pre>
+      </div>
+    </div>
+
+    <!-- 全局提示 -->
+    <div id="toast" class="toast hidden"></div>
+  </div>
+
+  <script src="api.js"></script>
+  <script src="screen.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

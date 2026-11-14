@@ -1,0 +1,62 @@
+#!/bin/sh
+# =============================================================================
+# 升级后处理（fnOS 生命周期脚本）
+#
+# 行为：
+#   1) 调 cmd/main start —— 内含 20s /api/health 200 健康轮询，与平台启动路径完全一致
+#   2) 成功 → exit 0；失败 → 还原 settings.json.bak 后 exit 1（让升级流程报错，
+#      而不是留下「装好了但起不来」的静默故障）
+#   3) 若配置无需回滚（没有 .bak），仍返回原失败码
+#
+# 幂等：服务已在运行且健康时 cmd/main start 直接返回 0，可安全重复调用。
+# =============================================================================
+set -u
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+DATA_ROOT="${TRIM_PKGVAR:-${TRIM_APPDATA:-$HOME/.apkstart}}"
+BAK="$DATA_ROOT/settings.json.bak"
+SETTINGS="$DATA_ROOT/settings.json"
+LOG_FILE="${TRIM_TEMP_LOGFILE:-$DATA_ROOT/logs/upgrade.log}"
+
+mkdir -p "$DATA_ROOT/logs" 2>/dev/null || true
+
+log() {
+  msg="[$(date '+%Y-%m-%dT%H:%M:%S%z')] [upgrade_callback] $*"
+  echo "$msg" >> "$LOG_FILE" 2>/dev/null || echo "$msg"
+}
+
+log "升级后处理开始"
+
+if [ ! -x "$SCRIPT_DIR/main" ]; then
+  log "未找到可执行的 cmd/main，无法启动服务"
+  echo "升级失败：未找到 cmd/main" >&2
+  exit 1
+fi
+
+if "$SCRIPT_DIR/main" start; then
+  log "服务启动成功（健康检查通过）"
+  rm -f "$BAK" 2>/dev/null || true
+  log "升级后处理完成"
+  exit 0
+fi
+
+log "服务启动失败，尝试回滚 settings.json"
+
+if [ -f "$BAK" ]; then
+  if cp "$BAK" "$SETTINGS" 2>/dev/null; then
+    log "已还原 settings.json.bak → settings.json，再次尝试启动"
+    if "$SCRIPT_DIR/main" start; then
+      log "回滚配置后启动成功"
+      echo "升级已完成，但新配置不可用，已回滚到升级前配置（请检查 ${LOG_FILE}）" >&2
+      exit 0
+    fi
+    log "回滚配置后仍然启动失败"
+  else
+    log "还原 settings.json.bak 失败"
+  fi
+else
+  log "无 settings.json.bak，无法回滚配置"
+fi
+
+echo "升级失败：服务无法启动，请查看日志 $LOG_FILE" >&2
+exit 1
