@@ -28,6 +28,17 @@
       "is_docker": false,
       "service_port": "18990",
       "releases": {
+        "0.2.4": {
+          "changelog": "0.2.4 — 修「装了也起不来」的三个链式真因，GPU 加速真机跑通",
+          "updated_at": "2026-11-14T07:28:28Z",
+          "packages": {
+            "x86": {
+              "download_url": "https://github.com/TaroCats/apkstart/releases/download/v0.2.4/apkstart-fnos_0.2.4_x86.fpk",
+              "sha256": "c7a010da3752d5652ea51a5ae72fd88dcdec5b0eae89a62b34586131e0ed84b8",
+              "size": 105445
+            }
+          }
+        },
         "0.2.3": {
           "changelog": "0.2.3：修默认端口冲突 —— 8890 在目标机被 Docker 里的 uvicorn 长期占用，服务 bind 不上。默认端口改 18990，端口来源改为 TRIM_SERVICE_PORT → ui/config（单一真源） → 默认值；cmd/main 启动前探测占用并点名占用者与改法；config/resource 的 port 与 ui/config 同源注入；顺带修 macOS 打包的 xattr PAX 头（--no-xattrs 才有效，0.2.2 的 --no-mac-metadata 未生效）。0.2.3 是能装且能起来的版本。",
           "updated_at": "2026-11-14T06:37:20Z",
