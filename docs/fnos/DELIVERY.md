@@ -4,6 +4,7 @@
 |---|---|
 | 上游仓库 | https://github.com/TaroCats/apkstart |
 | 目标平台 | 飞牛 fnOS（x86，KVM） |
+| **当前可交付版本** | **`0.2.2`**（见下方发布表首行；本表其余数值是 `0.1.0` 首次交付的基线快照，保留用于对照） |
 | 产物 | `dist/apkstart-fnos_0.1.0_x86.fpk` |
 | 大小 | 90,722 B |
 | sha256 | `cee439f852e7e95851c8c75475304fa585897c43a3c72617e88a2febc791f21c` |
@@ -16,18 +17,28 @@
 
 | 版本 | 产物 | 大小 | sha256 | 发布时间 |
 |---|---|---|---|---|
+| `0.2.2` | `apkstart-fnos_0.2.2_x86.fpk` | 100,452 B | `8b9a7f318bde97c8e085c1e9c709d237bbf75bdd37b55bed5f0018ee2b943e2a` | 2026-11-14T05:55Z |
 | `0.2.1` | `apkstart-fnos_0.2.1_x86.fpk` | 99,933 B | `d2219092bc5c80cd8a4b38a5cccc35b73d7b2591919f982dc2711644fe076ae3` | 2026-11-14T05:34Z |
 | `0.2.0` | `apkstart-fnos_0.2.0_x86.fpk` | 99,027 B | `ec0f9581d8e5fec2e5393192cad76cf59a51af4c0d753316ea837c1ef37723af` | 2026-11-14T04:37Z |
 | `0.1.0` | `apkstart-fnos_0.1.0_x86.fpk` | 90,722 B | `cee439f852e7e95851c8c75475304fa585897c43a3c72617e88a2febc791f21c` | 2026-11-13T20:16Z |
 
-> 三条 release 同时保留在仓库根 `fnpack.json` 里（`gen-fnpack.js` 是**增量合并**，不是覆盖），
-> `0.1.0` / `0.2.0` 可随时回滚下载。`0.2.0` 的体积差异来自 GPU 改造新增的
+> 四条 release 同时保留在仓库根 `fnpack.json` 里（`gen-fnpack.js` 是**增量合并**，不是覆盖），
+> `0.1.0` / `0.2.0` / `0.2.1` 可随时回滚下载。`0.2.2` 的体积比 `0.2.1` 多 519 B，来源是新增的
+> 根级 `app.tgz` 头部与 `cmd/` 两处修正，不是功能增量。
+>
+> **`0.2.2` 的 CI 产物已就地校验过结构**（不是只验本地包）：把 Release 上的
+> `apkstart-fnos_0.2.2_x86.fpk` 下回来跑 `node build/validate-package.js`，输出
+> `包结构校验通过: 根 21 条目 / app.tgz 43 条目`，sha256 `8b9a7f31…` 与 GitHub 上报的
+> asset digest 逐字一致。本地 macOS 包（bsdtar）与 CI 包（GNU tar）**字节不同**，
+> 但结构断言一致——这也是把校验放在**产物**上而不是源码上的原因。
+>
+> `0.2.0` 的体积差异来自 GPU 改造新增的
 > `service/xserver.js` + `service/gpu.js` 与 `render`/`video` 组声明。
 >
 > **`0.2.0` 不要用于 App Center 安装**：它的 `wizard/install`、`wizard/uninstall` 顶层是对象，
 > fnOS 侧类型是 `[]trimpkg.WizardPage`，会报 `wizard invalid: json: cannot unmarshal object …` /
 > `100610`（详见 IMPL 偏差 13）。`0.2.1` 已修复，包内容 checksum 与 `0.2.0` 只差在 wizard
-> 与版本串。`0.2.0` 资产**故意不覆盖**（可能已有用户下载），升级路径是直接装 `0.2.1`。
+> 与版本串。`0.2.0` 资产**故意不覆盖**（可能已有用户下载），升级路径是直接装最新版。
 >
 > **`0.2.1` 也不要用于 App Center 安装**：它把应用代码放在 fpk 根下的 `app/` 目录，而平台只认
 > **根级 `app.tgz`**，安装时报
@@ -42,7 +53,7 @@
 > 上游 apkstart 自身的 `0.2.7` 是另一条号，与 fpk 版本无关；`server/config.js` 的 `VERSION`
 > 默认值仅在未注入 `APKSTART_VERSION` 时兜底，`pack.sh` 会在计算 checksum 前注入实际版本。
 
-一句话结论：**四阶段全部落地，fpk 已在真实 fnOS 上按 fpk 生命周期契约完成端到端安装、运行、升级、卸载验证；CI 与 fnDepot 发布元数据齐备。** 三项依赖外部条件（App Center 图形界面、真实 Release 推送、fnDepot 客户端收录）无法在本机验证，已在文末单列。
+一句话结论：**四阶段全部落地，fpk 已在真实 fnOS 上按 fpk 生命周期契约完成端到端安装、运行、升级、卸载验证；CI 与 fnDepot 发布元数据齐备，`0.2.2` 起包结构符合 App Center 的 `app.tgz` 要求。** 仅剩两项依赖外部条件（App Center 图形界面点一次装完、fnDepot 客户端收录）未在本机闭环，已在文末「验证边界」逐项标注。
 
 ---
 
@@ -104,7 +115,7 @@ fnos/
 ### 验证
 - 包结构与 fpk 规范自检：62 条目、9 个 cmd 全 0755、顶层目录 `apkstart-fnos/`、两级图标齐全。
 - manifest checksum 独立复算：`find . -type f ! -name manifest | sort | xargs shasum -a 256 | shasum -a 256` → 与 manifest 内 `cbc497e5…` 一致。
-- 单元测试：`npm test` 全链 **105 通过 0 失败**（run-tests 39 / engine-test 24 / auto-test 3 / fnos-unit 39）。
+- 单元测试：`npm test` 全链 **138 通过 0 失败**（run-tests 39 / engine-test 24 / auto-test 3 / fnos-unit 72）。
 
 ---
 
@@ -139,6 +150,22 @@ fnos/
 | `cmd/main stop` | rc=0 |
 
 补充说明：一次「应用拉不起来 + systemui ANR」被误判成产品 bug，查明是 Docker 加载镜像把 load average 顶到 30+；负载回落后 `bootMs=32152` 恢复正常。已在 `IMPL.md` 记录，防止后续再误判。
+
+### 补充验证：0.2.2 的「等价安装」（修 10107 之后）
+
+App Center 的完整流程（下载 → 解 app.tgz → 落 `$TRIM_APPDEST` → 建桌面入口 → 跑 wizard）无法在本机复现：`trim-cli` 需要 OAuth 交互授权，profile `nas` 只有 `nas.oauth-pending.json`。**没有为此打断用户做授权**，改成按 App Center 的语义在真机上手工重放一遍：
+
+| 步骤 | 结果 |
+|---|---|
+| 按 `app.tgz` 语义解到临时 `APPDEST` | 顶层解出 `core server ui`，与包内成员逐项一致（无多套一层、无少一层） |
+| 入口文件齐备 | `server/index.js`、`server/config.js`、`ui/config`、`ui/index.html` 全在 |
+| 以 `TRIM_APPDEST` / `TRIM_PKGVAR` / `TRIM_SERVICE_PORT=28890` 起服务 | `/var/apps/nodejs_v22/target/bin/node` 正常拉起 |
+| `GET /api/health` | `200 {"app":"apkstart-fnos","status":"ok","version":"0.2.2","pid":4132607,"node":"v22.23.4"}` |
+| `SIGTERM` 收尾 | 优雅退出，无残留 |
+
+两点说明：
+- 端口用 **28890** 而不是习惯的 18890——目标机上 18890 已被别的服务监听（`ss -ltn` 可见）。这反映的是机器现状，与 `cmd/main` 的 `checkport` / 健康检查逻辑无关。
+- 这**不等于** App Center 全流程通过。它验证的是「包内容按平台语义解出来能跑」，能排除 10107 之后的下一类问题；真正装完仍需在 App Center 里点一次，见文末待办。
 
 ---
 
@@ -219,15 +246,26 @@ qemu 进程 `Uid: 926`（即包用户 `apkstart-fnos`），日志含 `Selecting 
 
 ---
 
-## 未能在本地验证的三项（如实标注）
+## 验证边界（如实标注，2026-11-14 更新）
 
-1. **App Center 图形界面点击安装**：目标机 `trim_app_center` 无 `install` 子命令，unix socket 直连返回 404 且需鉴权 → 改为**严格按 fpk 契约手工安装**（解包、建 6 个 `/vol2/@app*` 目录、6 条软链、建用户加组、注入 `TRIM_*` 跑 `install_init`/`install_callback`），覆盖了安装脚本与权限链，但没覆盖 App Center 自身的调度逻辑。
-2. **fnDepot 客户端实际收录**：需要把仓库真实推到 GitHub Public 并在客户端「添加源」，本地只能证明元数据符合 V2 schema。
-3. **真实 tag 触发的 GitHub Actions 实跑**：workflow 结构、脚本、release 步骤均已本地校验，但未经真实 runner 跑过一次。
+| 项 | 状态 |
+|---|---|
+| **真实 tag 触发的 GitHub Actions** | ✅ **已实际跑过多次**（`v0.2.0` / `v0.2.1` / `v0.2.2`），三 job 全绿；`Sync fnpack.json` 每次自动提交回 `main`（`8dd063d` 为 0.2.2 的同步提交） |
+| **Release 资产与 sha256** | ✅ `0.2.2` 资产 100,452 B / `8b9a7f31…`，与 `fnpack.json` 逐字一致；Release body 用 tag 注释正文（0.2.1 修掉「退化成 commit 首行」的问题后一直正常） |
+| **App Center 图形界面点击安装** | ⚠️ **部分覆盖**：`0.2.0` 走到 wizard 解析（100610）、`0.2.1` 走到 `app.tgz` 解包（10107），说明调度逻辑已被真实触发过；**`0.2.2` 能否装到「安装完成」仍待点一次确认** |
+| **fnDepot 客户端实际收录** | ⚠️ 未验：需要在客户端里「添加源」指向本仓库 `fnpack.json`，本地只能证明元数据符合 V2 schema |
 
-### 首次发版前必须人工完成的两件事（否则第一次 tag 会踩坑）
-1. **把仓库根 `fnpack.json` 一起 `git add` 提交**。它目前是未跟踪状态（`?? fnpack.json`，已 `git check-ignore` 确认未被忽略）。虽然 `Sync fnpack.json` 有能力在首次运行时替你创建，但那样初始入库的 commit 作者会是 bot；人工入库一次更干净，且之后同 tag 重跑能靠 `git diff --cached --quiet` 正确早退。
-2. **确认 `main` 没有开启「Require PR / branch protection」**。`Sync fnpack.json` 用 `GITHUB_TOKEN` 直推 `HEAD:main`，若 `main` 有保护规则会被拒、job 变红（属仓库设置层面，不是脚本问题）。另：`GITHUB_TOKEN` 的推送**不会**二次触发 workflow，不存在循环风险。
+### 手工安装的等价路径（无 App Center 时）
+
+目标机 `trim_app_center` 无 `install` 子命令，unix socket 直连返回 404 且需鉴权；`trim-cli` 则要 OAuth 交互授权。因此采用两级替代：
+
+1. **严格按 fpk 契约手工安装**（解包、建 `/vol2/@app*` 目录、软链、建用户加组、注入 `TRIM_*` 跑 `install_init`/`install_callback`）——覆盖安装脚本与权限链，但不覆盖 App Center 调度；
+2. **按 0.2.2 的语义只重放解包+启动**（见阶段 3「补充验证」）——覆盖「`app.tgz` 原样落到 `$TRIM_APPDEST` 后能跑起来」。
+
+### 发版基础设施现状（已过首次发版，保留为备忘）
+1. `fnpack.json` 已入库且由 CI 增量维护，无需人工干预；人工入库的理由（避免 bot 作首个作者）已不适用。
+2. `main` 未开启 branch protection —— `Sync fnpack.json` 用 `GITHUB_TOKEN` 直推 `HEAD:main` 一直成功。**若日后给 `main` 加保护规则，这一步会变红**（属仓库设置，不是脚本问题）。`GITHUB_TOKEN` 的推送不会二次触发 workflow，无循环风险。
+
 
 ## 已知备注（不影响验收）
 - `isSystemSurface()` 白名单只含 `com.android.bluetooth`，而本镜像蓝牙包名是 `com.google.android.bluetooth`；因弹窗分支直接置 `systemSurface=true`，不影响结果。若后续要精确化可补白名单项。
