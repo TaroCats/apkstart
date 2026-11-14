@@ -29,7 +29,7 @@
       "service_port": "8890",
       "releases": {
         "0.2.1": {
-          "changelog": "fix(fpk): wizard 改为顶层数组，修 App Center 安装报 wizard invalid",
+          "changelog": "修复 App Center 安装失败（wizard invalid / 100610）：wizard/install 与 wizard/uninstall 的 JSON 顶层改为数组 []trimpkg.WizardPage（原先写成对象）；uninstall 向导改为说明数据保留策略（field 值不进脚本，不做假开关）；新增 build/validate-wizard.js 与 3 个单测做回归护栏",
           "updated_at": "2026-11-14T05:34:18Z",
           "packages": {
             "x86": {

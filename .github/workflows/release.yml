@@ -26,10 +26,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          # 必须把附注 tag 对象也拉下来：默认 fetch-depth=1 又不取 tag，注入的
-          # refs/tags/vX 只是个指向 commit 的轻量引用，`git tag -l
-          # --format='%(contents:subject)'` 会退化成读 **commit subject**，
-          # changelog 直接变成 commit 首行（v0.2.0 实际踩到，写进了 fnpack.json）。
+          # fetch-depth: 0 是为了让后续能取到历史 / 标签历史。
+          # 注意：**它并不能**保证 `git tag --format='%(contents:subject)'` 拿到
+          # 附注 tag 的标题 —— checkout 自己会用 `+<sha>:refs/tags/<tag>` 把 tag
+          # 引用重置成轻量引用（见下方 Resolve version 里的详细说明与补救）。
           fetch-depth: 0
           fetch-tags: true
 
@@ -46,9 +46,26 @@ jobs:
             CHANGELOG="${{ github.event.inputs.changelog }}"
           else
             VERSION="${GITHUB_REF_NAME#v}"
-            # 取附注 tag 的标题作为版本说明：git tag -a v0.2.0 -m "..." 即可带上，
-            # 避免每次发版都要在网页里手填一遍 changelog。
+            # 取附注 tag 的标题作为版本说明：git tag -a v0.2.0 -m "..." 即可带上。
+            #
+            # 坑（v0.2.0 / v0.2.1 连续踩两次）：actions/checkout 在 checkout tag 时
+            # 会执行 `git fetch --no-tags ... origin +<sha>:refs/tags/<tag>`，把 ref
+            # **强制重置成指向 commit 的轻量引用**，先前 `+refs/tags/*:refs/tags/*`
+            # 拉下来的附注 tag 对象被覆盖。于是 `%(contents:subject)` 退化成读
+            # commit subject。fetch-depth: 0 + fetch-tags: true 救不了 —— 覆盖发生在
+            # checkout 自己那一步。必须在这里重新强拉一次（checkout 已结束，不会再被改）。
+            git fetch --force --tags origin "+refs/tags/${GITHUB_REF_NAME}:refs/tags/${GITHUB_REF_NAME}" >/dev/null 2>&1 || true
+            OBJ_TYPE="$(git cat-file -t "refs/tags/${GITHUB_REF_NAME}" 2>/dev/null || echo unknown)"
+            if [ "$OBJ_TYPE" != "tag" ]; then
+              # 轻量 tag（没 -m）本来就没有附注，属预期；但要显式告警，别静默发一版
+              # 说明是 commit 首行的包出去。
+              echo "::warning::${GITHUB_REF_NAME} 不是附注 tag（object type=$OBJ_TYPE），changelog 将缺失；建议 git tag -a 带 -m"
+            fi
             CHANGELOG="$(git tag -l --format='%(contents:subject)' "$GITHUB_REF_NAME" || true)"
+            # 兜底断言：拿到 commit subject 说明 tag 引用仍是轻量的，明确告警。
+            if [ -n "$CHANGELOG" ] && [ "$CHANGELOG" = "$(git log -1 --format=%s)" ]; then
+              echo "::warning::changelog 等于 commit subject，tag 引用可能是轻量引用（changelog 会不好看）"
+            fi
           fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           # 多行/含引号的说明走文件传递，避免 ::set-output 与 shell 转义的坑

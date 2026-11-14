@@ -535,10 +535,22 @@ topResumedActivity=ActivityRecord{42387ca u0 com.google.android.apps.nexuslaunch
 
 取证来源：`fn-scheduler`（tips）、`cloudlink-finder`（switch + rules.required）、`baidu.netdisk`（text + rules.pattern `^确认$`）。
 
-**第二个结论（同样影响设计）：`field` 的值不会传到 `cmd/*` 脚本。**
-在 `cloudlink-finder`、`dpanel` 的 `cmd/*` 里 grep `TRIM_WIZARD` / `wizard` 零命中（只命中 wizard 文件自身）——`field` 只参与**前端表单校验**。所以 `uninstall_callback` 读的 `TRIM_UNINSTALL_PURGE` 环境变量**不可能**由向导勾选产生；原先 PRD P1-9 说的"wizard 选择生效"在 fnOS 上做不到。
+**第二个结论（同样影响设计）：`field` 的值到不了 `cmd/*` 脚本。**
 
-> 因此 `wizard/uninstall` 没有做成"勾了就删数据"的 `switch`——那会是个**假开关**（勾了不生效）。改成两段 `tips` 说明"数据会保留 + 怎么手动清"，脚本侧仍只认外部传入的 `TRIM_UNINSTALL_PURGE=1`。同时删掉 `uninstall_callback` 头注释里"或 wizard 传入 purge=true"这句不成立的承诺。
+先纠正一个容易想当然的地方：字段值**并不是**完全没用——官方 CLI 的
+`app install --custom-parameters '[{"key":"port","value":8080}]'` 就是喂给 wizard 字段的
+（`trim_app_center` 里有 `req.CustomParameter` / `json:"customParameters"` /
+`FilterCustomParameters`），所以值确实进了**安装任务的 `customParameters`**。
+
+但对 shell 生命周期脚本不可见。三重证据：
+
+1. 在 `cloudlink-finder`、`dpanel` 的 `cmd/*` 里 grep `TRIM_WIZARD` / `wizard` 零命中（只命中 wizard 文件自身）。
+2. `strings /usr/trim/bin/trim_app_center | grep -oE 'TRIM_[A-Z_]+' | sort -u` 得到 app_center 注入给脚本的完整环境变量表——`TRIM_APPNAME`/`TRIM_APPVER`/`TRIM_PKGVAR`/`TRIM_PKGTMP`/`TRIM_PKGETC`/`TRIM_APPDEST`/`TRIM_RUN_UID`/`TRIM_SERVICE_PORT`/`INSTALL_VOLUME_ID`/`WIZARD_EXCEPTION`…… **没有任何 per-field 的 `TRIM_*`**。
+3. 顺带发现：我们脚本里读的 `TRIM_UNINSTALL_PURGE` **不在这张表里**，fnOS 不会替我们设置它——所以 purge 分支实际是"仅当外部手动传入才生效"，不能算功能。
+
+因此 `wizard/uninstall` 没有做成"勾了就删数据"的 `switch`——那会是个**假开关**。改成两段 `tips` 说明"数据会保留 + 怎么手动清"，脚本侧仍只认外部传入的 `TRIM_UNINSTALL_PURGE=1`。同时删掉 `uninstall_callback` 头注释里"或 wizard 传入 purge=true"这句不成立的承诺。
+
+**顺带从二进制字符串表读到的校验规则**（比我们的校验器更细，可作为后续扩展参照）：校验函数是 `ParseInstallWizard` / `ParseUninstallWizard`，item 类型除 `tips`/`switch`/`text` 外还有 `select`/`checkbox`/`password`；逐项报错有 `wizard item type %s is invalid`、`wizard switch field is empty`、`wizard select options is empty`、`wizard required message is empty` 等。我们只用了 `tips`，不涉及这些必填项，但校验器已按白名单卡死（写错 type 会在打包时就失败）。
 
 **修复与护栏**：
 
@@ -546,6 +558,7 @@ topResumedActivity=ActivityRecord{42387ca u0 com.google.android.apps.nexuslaunch
 2. 新增 `build/validate-wizard.js`：校验顶层是数组、`stepTitle` 非空、`items` 非空、`type` 在白名单内（`tips`/`switch`/`text`）、各类型必填键、`rules` 形状；并强制 `install`、`uninstall` 两个文件都在。
 3. `build/pack.sh` 第 2.5 步校验**stage 里那份**（即真正进包的那份），不通过就不打包。
 4. 单测 3 例（`test/fnos-unit.js`，64 → 67）：仓库内 wizard 全过校验；校验器能拒掉对象格式 / 非法 JSON / 缺 `stepTitle` / 未知 `type`；`uninstall` 里不许出现 `field`（防假开关回潮）。Linux CI job 直接跑这份单测，所以红会红在 PR 上。
+5. **附带修掉一个连踩两次的发版基建坑**：`actions/checkout` 在 checkout tag 时会执行 `git fetch --no-tags … origin +<sha>:refs/tags/<tag>`，把 tag 引用**强制重置成指向 commit 的轻量引用**，先前 `+refs/tags/*:refs/tags/*` 拉下来的附注 tag 对象被覆盖 → `git tag --format='%(contents:subject)'` 退化成读 commit subject → changelog 变成 commit 首行（v0.2.0、v0.2.1 连续中招）。`fetch-depth: 0` + `fetch-tags: true` **救不了**，因为覆盖发生在 checkout 自己那一步。`release.yml` 的 Resolve 步骤改为 checkout 之后**重新强拉一次 tag**，并用 `git cat-file -t` 断言拿到的是 `tag` 而不是 `commit`，不符就 `::warning::`。
 
 **版本处置**：`0.2.0` 的资产对 App Center 安装是坏的，**不覆盖**已有 Release（有用户可能已下载/做校验），直接发 `0.2.1`。
 
