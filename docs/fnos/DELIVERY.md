@@ -10,6 +10,11 @@
 | manifest checksum | `cbc497e5a23e7950c9d25321f10952aea5ba30e320585ccbd72c97fb955516b3` |
 | 包内条目 | 62 |
 | fnDepot 元数据 | 仓库根 `fnpack.json`（sha256 `158d0ff8…`），与 `dist/fnpack.snippet.json` 逐字一致 |
+
+> **版本口径**：本文档「v0.1」指首个 fpk 包 `0.1.0`；「v0.2」指 GPU 改造后待发的 `0.2.0`
+> （`bash build/pack.sh --version 0.2.0`，需重新生成 manifest/checksum 并回写 `fnpack.json`）。
+> 上游 apkstart 自身的 `0.2.7` 是另一条号，与 fpk 版本无关；`server/config.js` 的 `VERSION`
+> 默认值仅在未注入 `APKSTART_VERSION` 时兜底，打包脚本会显式注入。
 | 真机验收环境 | `root@10.31.0.4`，验证端口 18890 |
 
 一句话结论：**四阶段全部落地，fpk 已在真实 fnOS 上按 fpk 生命周期契约完成端到端安装、运行、升级、卸载验证；CI 与 fnDepot 发布元数据齐备。** 三项依赖外部条件（App Center 图形界面、真实 Release 推送、fnDepot 客户端收录）无法在本机验证，已在文末单列。
