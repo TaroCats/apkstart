@@ -10,12 +10,22 @@
 | manifest checksum | `cbc497e5a23e7950c9d25321f10952aea5ba30e320585ccbd72c97fb955516b3` |
 | 包内条目 | 62 |
 | fnDepot 元数据 | 仓库根 `fnpack.json`（sha256 `158d0ff8…`），与 `dist/fnpack.snippet.json` 逐字一致 |
-
-> **版本口径**：本文档「v0.1」指首个 fpk 包 `0.1.0`；「v0.2」指 GPU 改造后待发的 `0.2.0`
-> （`bash build/pack.sh --version 0.2.0`，需重新生成 manifest/checksum 并回写 `fnpack.json`）。
-> 上游 apkstart 自身的 `0.2.7` 是另一条号，与 fpk 版本无关；`server/config.js` 的 `VERSION`
-> 默认值仅在未注入 `APKSTART_VERSION` 时兜底，打包脚本会显式注入。
 | 真机验收环境 | `root@10.31.0.4`，验证端口 18890 |
+
+### 已发布版本（GitHub Releases，由 `release.yml` 构建）
+
+| 版本 | 产物 | 大小 | sha256 | 发布时间 |
+|---|---|---|---|---|
+| `0.2.0` | `apkstart-fnos_0.2.0_x86.fpk` | 99,027 B | `ec0f9581d8e5fec2e5393192cad76cf59a51af4c0d753316ea837c1ef37723af` | 2026-11-14T04:37Z |
+| `0.1.0` | `apkstart-fnos_0.1.0_x86.fpk` | 90,722 B | `cee439f852e7e95851c8c75475304fa585897c43a3c72617e88a2febc791f21c` | 2026-11-13T20:16Z |
+
+> 两条 release 同时保留在仓库根 `fnpack.json` 里（`gen-fnpack.js` 是**增量合并**，不是覆盖），
+> `0.1.0` 可随时回滚下载。`0.2.0` 的体积差异来自 GPU 改造新增的
+> `service/xserver.js` + `service/gpu.js` 与 `render`/`video` 组声明。
+>
+> **版本口径**：本文档「v0.1」指首个 fpk 包 `0.1.0`；「v0.2」指 GPU 改造版 `0.2.0`。
+> 上游 apkstart 自身的 `0.2.7` 是另一条号，与 fpk 版本无关；`server/config.js` 的 `VERSION`
+> 默认值仅在未注入 `APKSTART_VERSION` 时兜底，`pack.sh` 会在计算 checksum 前注入实际版本。
 
 一句话结论：**四阶段全部落地，fpk 已在真实 fnOS 上按 fpk 生命周期契约完成端到端安装、运行、升级、卸载验证；CI 与 fnDepot 发布元数据齐备。** 三项依赖外部条件（App Center 图形界面、真实 Release 推送、fnDepot 客户端收录）无法在本机验证，已在文末单列。
 
@@ -178,7 +188,7 @@ qemu 进程 `Uid: 926`（即包用户 `apkstart-fnos`），日志含 `Selecting 
 
 **净收益 ≈ 3.3s（-10.6%）**。此前一度观察到「root 22s vs off 34s」的 12s 差距，含冷启动与噪声，不可复现；开机主要耗在 Android framework/zygote，不在 GL。
 
-### 决策：v0.2 起默认 `gpu: 'auto'`（已实施）
+### 决策：v0.2 起默认 `gpu: 'auto'`（`0.2.0` 已发布）
 
 ~~不把这个能力做进默认路径~~ —— 第二轮改造已落地，形态与最初设想不同：**二进制不随包携带**（KasmVNC 是 GPL-2.0 强 copyleft，且依赖 `libxfont2`/`libpixman-1-0`/`libunwind8`/`libwebp7`/`libxshmfence1` 等独立 deb），改由运维把 `Xkasmvnc`（+x）投放到 `$TRIM_PKGVAR/runtime/xserver/`。默认 `gpu: 'auto'`：检测到「支持 `-hw3d` 的 X server + `renderD128` 可读写」就上 `-gpu host`，否则安静回落 `off`（与旧版行为一致）；`-gpu host` 启动失败还会自动 `-gpu off` 重试一次。**包体积零增量**，`join-groups` 追加 `render`、`video`。
 
