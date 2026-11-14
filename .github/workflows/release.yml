@@ -8,9 +8,13 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: '版本号（不含 v，如 0.1.0）'
+        description: '版本号（不含 v，如 0.2.0）'
         required: false
         default: '0.1.0'
+      changelog:
+        description: '版本说明（写进 fnpack.json 的 changelog，留空则用 tag 注释）'
+        required: false
+        default: ''
 
 permissions:
   contents: write
@@ -32,13 +36,26 @@ jobs:
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             VERSION="${{ github.event.inputs.version }}"
+            CHANGELOG="${{ github.event.inputs.changelog }}"
           else
             VERSION="${GITHUB_REF_NAME#v}"
+            # 取附注 tag 的标题作为版本说明：git tag -a v0.2.0 -m "..." 即可带上，
+            # 避免每次发版都要在网页里手填一遍 changelog。
+            CHANGELOG="$(git tag -l --format='%(contents:subject)' "$GITHUB_REF_NAME" || true)"
           fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          # 多行/含引号的说明走文件传递，避免 ::set-output 与 shell 转义的坑
+          {
+            echo 'changelog<<__CL_EOF__'
+            printf '%s\n' "$CHANGELOG"
+            echo '__CL_EOF__'
+          } >> "$GITHUB_OUTPUT"
           echo "Resolved version: $VERSION"
+          echo "Resolved changelog: ${CHANGELOG:-（空，使用默认说明）}"
 
       - name: Build fpk
+        env:
+          CHANGELOG: ${{ steps.ver.outputs.changelog }}
         run: bash build/pack.sh --version "${{ steps.ver.outputs.version }}"
 
       - name: Show sha256
@@ -63,6 +80,7 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
+          body: ${{ steps.ver.outputs.changelog }}
           files: |
             dist/*.fpk
             dist/*.sha256

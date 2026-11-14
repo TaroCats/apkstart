@@ -7,7 +7,11 @@
  * 各文件 sha256 行（`<hex>  ./relpath`）拼接文本」的 sha256，与
  * `find . -type f ! -name manifest | sort | xargs sha256sum | sha256sum` 等价。
  *
- * 用法：node build/gen-manifest.js --stage <dir> --template <file> --out <file> --version <v> --port <p>
+ * 用法：node build/gen-manifest.js --stage <dir> --template <file> --out <file>
+ *                            --version <v> --port <p> [--changelog <text>]
+ *
+ * manifest 是严格的每行一个 `key=value`，所以 changelog 里的换行必须压成空格，
+ * 否则多出来的行会被 fnOS 当成未知键（甚至解析失败）。
  */
 const fs = require('fs');
 const path = require('path');
@@ -77,6 +81,7 @@ function main() {
   const outFile = args.out || (stageDir && path.join(stageDir, 'manifest'));
   const version = args.version || '0.1.0';
   const port = args.port || '8890';
+  const changelog = String(args.changelog || '初始 fnOS 移植版本').replace(/\s*\n\s*/g, ' ').trim();
 
   if (!stageDir || !fs.existsSync(stageDir)) throw new Error(`stage 目录不存在: ${stageDir}`);
   if (!templateFile || !fs.existsSync(templateFile)) throw new Error(`模板不存在: ${templateFile}`);
@@ -87,10 +92,12 @@ function main() {
     VERSION: version,
     PORT: port,
     CHECKSUM: checksum,
+    CHANGELOG: changelog,
   });
   fs.writeFileSync(outFile, body, 'utf8');
   console.log(`manifest 已生成: ${outFile}`);
   console.log(`  version=${version} port=${port} checksum=${checksum}`);
+  console.log(`  changelog=${changelog}`);
 }
 
 if (require.main === module) {

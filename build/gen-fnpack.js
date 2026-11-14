@@ -15,8 +15,14 @@
  *   - maintainer / distributor 还有配套的 maintainer_url / distributor_url（真实源有）
  *   - preview_urls 只在确实有截图时写，没有就整个键省略（不要留空数组）
  *
- * 用法：node build/gen-fnpack.js --version <v> [--sha256 <hex>] [--size <bytes>] [--out <file>]
+ * 用法：node build/gen-fnpack.js --version <v> [--changelog <text>]
+ *                              [--sha256 <hex>] [--size <bytes>] [--out <file>]
  * 未提供 sha256/size 时，若 dist/<appname>_<v>_x86.fpk 存在则自动计算。
+ *
+ * **releases 是增量合并，不是覆盖**：release.yml 的 Sync 步骤会把本文件的输出
+ * `cp` 成仓库根的 fnpack.json，若这里只写当前版本一条，每发一次新版就会把历史
+ * 版本从 FnDepot 源里整段抹掉（老版本无法回滚下载）。所以先把仓库根现有的
+ * releases 全部读进来，再用本次版本覆盖同名键。
  */
 const fs = require('fs');
 const path = require('path');
@@ -52,6 +58,24 @@ function sha256File(file) {
   return crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
 }
 
+/**
+ * 读取仓库根 fnpack.json 里已有的 releases（用于增量合并）。
+ * 读不到/解析失败一律当作「没有历史」——发版不该因为一个坏文件整体失败，
+ * 但那会让历史版本丢失，所以解析失败要显式告警而不是静默吞掉。
+ */
+function readExistingReleases() {
+  const src = path.join(ROOT, 'fnpack.json');
+  if (!fs.existsSync(src)) return {};
+  try {
+    const prev = JSON.parse(fs.readFileSync(src, 'utf8'));
+    const releases = (prev.apps && prev.apps[APPNAME] && prev.apps[APPNAME].releases) || {};
+    return releases && typeof releases === 'object' ? releases : {};
+  } catch (e) {
+    console.warn(`[gen-fnpack] 警告：无法解析 ${src}（${e.message}），本次将只写当前版本`);
+    return {};
+  }
+}
+
 function main() {
   const args = parseArgs(process.argv.slice(2));
   const version = args.version || '0.1.0';
@@ -66,6 +90,28 @@ function main() {
   }
 
   const iso = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
+
+  // 增量合并：历史版本原样保留，本次版本覆盖同名键并排到最前（最新在前）。
+  const history = readExistingReleases();
+  delete history[version];
+  const historicalCount = Object.keys(history).length;
+
+  const current = {
+    changelog: args.changelog || '初始 fnOS 移植版本',
+    updated_at: iso,
+    // 不写 os_min_version：真实源取值是平台构建号（如 1.1.3100 / 0.9.27），
+    // 我们没有可靠值，宁可省略也不瞎填（该字段可选）。
+    packages: {
+      // key 用平台词表 x86（不是 x86_64）
+      [ARCH]: {
+        // Release 资产地址，形态与 huitai 一致
+        download_url: `${REPO_URL}/releases/download/v${version}/${fpkName}`,
+        sha256: sha,
+        size,
+      },
+    },
+  };
+
   const snippet = {
     schema_version: '2',
     source_info: {
@@ -106,21 +152,8 @@ function main() {
         // 真实源为字符串（"9080" / "7401" / "7983"），不是数字
         service_port: '8890',
         releases: {
-          [version]: {
-            changelog: '初始 fnOS 移植版本',
-            updated_at: iso,
-            // 不写 os_min_version：真实源取值是平台构建号（如 1.1.3100 / 0.9.27），
-            // 我们没有可靠值，宁可省略也不瞎填（该字段可选）。
-            packages: {
-              // key 用平台词表 x86（不是 x86_64）
-              [ARCH]: {
-                // Release 资产地址，形态与 huitai 一致
-                download_url: `${REPO_URL}/releases/download/v${version}/${fpkName}`,
-                sha256: sha,
-                size,
-              },
-            },
-          },
+          [version]: current,
+          ...history,
         },
       },
     },
@@ -129,7 +162,9 @@ function main() {
   const outFile = args.out || path.join(DIST, 'fnpack.snippet.json');
   fs.mkdirSync(path.dirname(outFile), { recursive: true });
   fs.writeFileSync(outFile, JSON.stringify(snippet, null, 2) + '\n', 'utf8');
-  console.log(`fnpack 片段已生成: ${outFile}`);
+  console.log(
+    `fnpack 片段已生成: ${outFile}（版本 ${version}，另保留历史 ${historicalCount} 条）`
+  );
 }
 
 if (require.main === module) {

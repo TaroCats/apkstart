@@ -4,7 +4,7 @@
 #   1) 生成图标   2) 组装 stage  3) 生成 ui 入口 config
 #   4) 生成 manifest  5) tar.gz→.fpk  6) sha256  7) fnpack 片段
 # 可复现：Linux 下固定 --mtime/--owner/--group/--sort（同 tag 重跑 sha256 稳定）。
-# 用法：bash build/pack.sh --version 0.1.0 [--port 8890]
+# 用法：bash build/pack.sh --version 0.1.0 [--port 8890] [--changelog "说明"]
 # =============================================================================
 set -euo pipefail
 
@@ -12,13 +12,15 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APPNAME="apkstart-fnos"
 VERSION="${VERSION:-0.1.0}"
 PORT="${PORT:-8890}"
+CHANGELOG="${CHANGELOG:-}"
 
 # ---- 解析参数 ----
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --version) VERSION="$2"; shift 2 ;;
-    --port)    PORT="$2";    shift 2 ;;
-    -h|--help) echo "用法: bash build/pack.sh --version <v> [--port <p>]"; exit 0 ;;
+    --version)   VERSION="$2";   shift 2 ;;
+    --port)      PORT="$2";      shift 2 ;;
+    --changelog) CHANGELOG="$2"; shift 2 ;;
+    -h|--help) echo "用法: bash build/pack.sh --version <v> [--port <p>] [--changelog <text>]"; exit 0 ;;
     *) echo "未知参数: $1" >&2; exit 2 ;;
   esac
 done
@@ -62,14 +64,32 @@ cat > "$PKGROOT/app/ui/config" <<EOF
 {".url":{"$APPNAME.main":{"title":"ApkStart","icon":"images/icon_64.png","type":"url","protocol":"http","port":"$PORT","url":"/","allUsers":true}}}
 EOF
 
-# ---- 4) 生成 manifest（注入 version/port/checksum，ARCH §7.2）----
+# ---- 3.5) 注入包内版本兜底值（必须在 gen-manifest 算 checksum 之前）----
+# config.js 里 `process.env.APKSTART_VERSION || 'x.y.z'` 的兜底值是静态写死的，
+# 不注入的话包里运行时报的版本永远是源码里那个（0.1.0）。运行时没人会设
+# APKSTART_VERSION，所以必须构建期改写。
+node - "$PKGROOT/app/server/config.js" "$VERSION" <<'NODE'
+const fs = require('fs');
+const [file, ver] = process.argv.slice(2);
+const src = fs.readFileSync(file, 'utf8');
+const re = /(process\.env\.APKSTART_VERSION\s*\|\|\s*)'[^']*'/;
+if (!re.test(src)) {
+  console.error(`!! config.js 中未找到 VERSION 兜底值，版本注入失败: ${file}`);
+  process.exit(1);
+}
+fs.writeFileSync(file, src.replace(re, `$1'${ver}'`), 'utf8');
+console.log(`config.js 版本已注入: ${ver}`);
+NODE
+
+# ---- 4) 生成 manifest（注入 version/port/changelog/checksum，ARCH §7.2）----
 rm -f "$PKGROOT/manifest"   # checksum 计算需排除 manifest 本身
 node "$ROOT/build/gen-manifest.js" \
   --stage "$PKGROOT" \
   --template "$ROOT/fnos/manifest.in" \
   --out "$PKGROOT/manifest" \
   --version "$VERSION" \
-  --port "$PORT"
+  --port "$PORT" \
+  --changelog "${CHANGELOG:-初始 fnOS 移植版本}"
 
 # ---- 5) 打包（tar.gz → .fpk），可复现 ----
 # 产物名里的架构段用 fnOS 平台词表 x86（与 manifest 的 platform=x86 对齐），
@@ -98,8 +118,12 @@ else
   ( cd "$DIST" && shasum -a 256 "$(basename "$FPK")" > "$(basename "$FPK").sha256" )
 fi
 
-# ---- 7) fnpack 片段 ----
-node "$ROOT/build/gen-fnpack.js" --version "$VERSION"
+# ---- 7) fnpack 片段（增量合并仓库根 fnpack.json 的历史 releases，勿改成覆盖）----
+if [[ -n "$CHANGELOG" ]]; then
+  node "$ROOT/build/gen-fnpack.js" --version "$VERSION" --changelog "$CHANGELOG"
+else
+  node "$ROOT/build/gen-fnpack.js" --version "$VERSION"
+fi
 
 echo "==> 完成："
 ls -l "$FPK" "$FPK.sha256"
