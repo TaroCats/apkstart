@@ -23,6 +23,24 @@ function _num(v, name) {
   return Math.round(n);
 }
 
+/**
+ * 注入一条 input 命令。
+ *
+ * 两处「看起来发了、其实没到设备」的隐蔽路径都在这里兜住：
+ *  1. 常驻输入通道（core/adb.js 的 `_inputSession`）在模拟器重启后会断，
+ *     命令写进死管道等于丢掉 —— 退回一次性 `adb shell` 再发一次。
+ *  2. `input swipe` 会阻塞到滑动结束，原先固定 4s 的通道超时对 3s 的长滑动
+ *     非常贴边，一旦超时就把这条滑动判成失败。这里按时长放宽。
+ */
+async function _inject(adb, cmd, { timeout = 4000 } = {}) {
+  try {
+    await adb.input(cmd, { timeout });
+  } catch (e) {
+    if (typeof adb.shell !== 'function') throw e;
+    await adb.shell(cmd, { timeout: timeout + 4000 });
+  }
+}
+
 /** GET /api/screen/frame → image/png 或 204 */
 async function frame(ctx, req, res, params, h) {
   if (!ctx.emulator || ctx.emulator.state !== 'running') {
@@ -63,7 +81,7 @@ async function tap(ctx, req, res, params, h) {
   const body = await h.readJson(req);
   const x = _num(body.x, 'x');
   const y = _num(body.y, 'y');
-  await adb.input(`input tap ${x} ${y}`);
+  await _inject(adb, `input tap ${x} ${y}`);
   h.sendJson(res, 200, { ok: true });
 }
 
@@ -75,8 +93,13 @@ async function swipe(ctx, req, res, params, h) {
   const y1 = _num(body.y1, 'y1');
   const x2 = _num(body.x2, 'x2');
   const y2 = _num(body.y2, 'y2');
-  const dur = Math.max(50, Math.min(3000, Number(body.durationMs) || 300));
-  await adb.input(`input swipe ${x1} ${y1} ${x2} ${y2} ${Math.round(dur)}`);
+  // 起点=终点时不是滑动，而是「原地按住」：UI 侧用它表达长按（input tap 只是
+  // 瞬时的 down+up，触发不了长按菜单），所以时长下限放宽到 300ms。
+  const same = x1 === x2 && y1 === y2;
+  const lo = same ? 300 : 50;
+  const dur = Math.max(lo, Math.min(3000, Number(body.durationMs) || 300));
+  const ms = Math.round(dur);
+  await _inject(adb, `input swipe ${x1} ${y1} ${x2} ${y2} ${ms}`, { timeout: ms + 6000 });
   h.sendJson(res, 200, { ok: true });
 }
 
@@ -101,7 +124,7 @@ async function text(ctx, req, res, params, h) {
     throw e;
   }
   const escaped = escapeInputText(body.text);
-  await adb.input(`input text '${escaped}'`);
+  await _inject(adb, `input text '${escaped}'`);
   h.sendJson(res, 200, { ok: true });
 }
 
@@ -117,8 +140,8 @@ async function key(ctx, req, res, params, h) {
     e.code = 'BAD_REQUEST';
     throw e;
   }
-  await adb.input(`input keyevent ${code}`);
+  await _inject(adb, `input keyevent ${code}`);
   h.sendJson(res, 200, { ok: true });
 }
 
-module.exports = { frame, size, tap, swipe, text, key, escapeInputText };
+module.exports = { frame, size, tap, swipe, text, key, escapeInputText, _inject };

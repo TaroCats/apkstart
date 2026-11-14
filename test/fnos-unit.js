@@ -1187,3 +1187,150 @@ test('emulator 子进程必须显式给 cwd，不能继承服务进程的 cwd', 
   const src = fs.readFileSync(path.join(__dirname, '..', 'server', 'service', 'emulator.js'), 'utf8');
   assert(/\{ env, cwd, stdio:/.test(src), 'spawn(emulator) 必须传 cwd');
 });
+
+// --- 画面输入（偏差 17：能看见画面但点不动 / 滑不动）-------------------
+
+const ScreenView = require('../ui/screen.js');
+const { classifyGesture } = ScreenView;
+
+test('classifyGesture：没位移的点击 → tap', () => {
+  const g = classifyGesture({ dx: 0, dy: 0, deviceDx: 0, deviceDy: 0, elapsed: 120 });
+  assertEqual(g.kind, 'tap');
+});
+
+test('classifyGesture：3px 手抖的点击仍是 tap（真机实测 0 请求的那一例）', () => {
+  // 真机现场（10.31.0.4，Edge 自动化）：img 344x612 CSS px 显示 1080x1920，
+  // 1 CSS px ≈ 3.14 设备像素。移 (3,2) 个浏览器像素 = (9,6) 设备像素，
+  // 旧逻辑按「8 设备像素」判 swipe → 发出 input swipe x y x+3 y 50 → 屏幕无反应。
+  const g = classifyGesture({ dx: 3, dy: 2, deviceDx: 9, deviceDy: 6, elapsed: 90 });
+  assertEqual(g.kind, 'tap', '手抖必须仍算点击，否则用户体感就是「点了没反应」');
+});
+
+test('classifyGesture：真拖拽 → swipe，时长取真实按住时长', () => {
+  const g = classifyGesture({ dx: 0, dy: -400, deviceDx: 0, deviceDy: -1256, elapsed: 240 });
+  assertEqual(g.kind, 'swipe');
+  assertEqual(g.durationMs, 240);
+});
+
+test('classifyGesture：甩得再快 swipe 时长也不低于 100ms（太短会被 ROM 当 fling 丢掉）', () => {
+  const g = classifyGesture({ dx: 0, dy: 300, deviceDx: 0, deviceDy: 940, elapsed: 12 });
+  assertEqual(g.kind, 'swipe');
+  assertEqual(g.durationMs, 100);
+  assertEqual(classifyGesture({ dx: 0, dy: 300, deviceDx: 0, deviceDy: 940, elapsed: 99999 }).durationMs, 2000,
+    '长拖也不能超过 2s');
+});
+
+test('classifyGesture：按住不动 900ms → hold（tap 触发不了长按菜单）', () => {
+  const g = classifyGesture({ dx: 1, dy: 1, deviceDx: 3, deviceDy: 3, elapsed: 900 });
+  assertEqual(g.kind, 'hold');
+});
+
+test('classifyGesture：画面缩得很小导致设备位移不足 6px 时仍按 tap（swipe 会变成空操作）', () => {
+  const g = classifyGesture({ dx: 40, dy: 0, deviceDx: 3, deviceDy: 0, elapsed: 200 });
+  assertEqual(g.kind, 'tap');
+});
+
+test('classifyGesture：缺字段/NaN 输入不抛错，退化成 tap', () => {
+  assertEqual(classifyGesture({}).kind, 'tap');
+  assertEqual(classifyGesture(undefined).kind, 'tap');
+  assertEqual(classifyGesture({ dx: NaN, dy: NaN, elapsed: NaN }).kind, 'tap');
+});
+
+test('画面 <img> 必须显式关掉原生拖拽（HTML5 drag 会发 pointercancel，swipe 一条也发不出去）', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'ui', 'screen.js'), 'utf8');
+  assert(/el\.draggable = false/.test(src), '必须设 img.draggable = false');
+  assert(/addEventListener\('dragstart'/.test(src), '还应有 dragstart 兜底（个别浏览器只认这个）');
+  const idx = src.indexOf("addEventListener('pointerdown'");
+  assert(idx > 0, '应有 pointerdown 处理');
+  const seg = src.slice(idx, idx + 700);
+  assert(/ev\.preventDefault\(\)/.test(seg), 'pointerdown 里必须 preventDefault，否则默认拖拽照样启动');
+
+  const css = fs.readFileSync(path.join(__dirname, '..', 'ui', 'style.css'), 'utf8');
+  assert(/-webkit-user-drag: none/.test(css), 'CSS 侧也要 -webkit-user-drag: none');
+});
+
+test('手势判定用 CSS 像素而不是设备像素（容差要跟屏幕缩放无关）', () => {
+  assertEqual(ScreenView.GESTURE.TAP_SLOP_CSS, 10);
+  const fs = require('fs');
+  const path = require('path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'ui', 'screen.js'), 'utf8');
+  // 记录起点时必须同时记 clientX/clientY，否则只能用设备像素判位移（就是旧 bug）
+  assert(/cx: ev\.clientX/.test(src) && /cy: ev\.clientY/.test(src), '起点要记浏览器坐标');
+  assert(!/dx < 8 && dy < 8/.test(src), '旧的「8 设备像素」判定必须移除');
+});
+
+function fakeScreenCtx() {
+  const cmds = [];
+  const adb = {
+    input: async (c) => { cmds.push(c); },
+    shell: async (c) => { cmds.push(`shell:${c}`); },
+  };
+  return { cmds, ctx: { emulator: { state: 'running', adb: () => adb } } };
+}
+
+function fakeRes() {
+  // 形状对齐 server/http 的 helper：sendJson(res, code, body)
+  return { code: 0, body: null, json: null, sendJson: (r, code, body) => { r.code = code; r.body = body; } };
+}
+
+test('screen/swipe：起点=终点时按长按处理，时长下限抬到 300ms', async () => {
+  const { swipe } = require('../server/api/screen');
+  const { cmds, ctx } = fakeScreenCtx();
+  const res = fakeRes();
+  await swipe(ctx, null, res, null, {
+    readJson: async () => ({ x1: 540, y1: 960, x2: 540, y2: 960, durationMs: 10 }),
+    sendJson: res.sendJson,
+  });
+  assertEqual(cmds[0], 'input swipe 540 960 540 960 300', '原地按住不能被压成 50ms（那样长按不会触发）');
+  assertEqual(res.code, 200);
+});
+
+test('screen/swipe：普通滑动保留真实时长，且超时按滑动时长放宽', async () => {
+  const { swipe } = require('../server/api/screen');
+  const cmds = [];
+  let seenOpts = null;
+  const adb = { input: async (c, o) => { cmds.push(c); seenOpts = o; }, shell: async () => {} };
+  const ctx = { emulator: { state: 'running', adb: () => adb } };
+  const res = fakeRes();
+  await swipe(ctx, null, res, null, {
+    readJson: async () => ({ x1: 540, y1: 1400, x2: 540, y2: 500, durationMs: 2500 }),
+    sendJson: res.sendJson,
+  });
+  assertEqual(cmds[0], 'input swipe 540 1400 540 500 2500');
+  // 常驻通道默认 4s：2.5s 的滑动一旦算上 adb 开销就会假超时
+  assert(seenOpts && seenOpts.timeout >= 8500, `2.5s 滑动的通道超时必须放宽，实际 ${seenOpts && seenOpts.timeout}`);
+});
+
+test('_inject：常驻输入通道断了要退回一次性 adb shell，不能把这次点击丢掉', async () => {
+  const { _inject } = require('../server/api/screen');
+  const cmds = [];
+  const adb = {
+    input: async () => { throw new Error('adb shell 已退出'); },
+    shell: async (c) => { cmds.push(c); },
+  };
+  await _inject(adb, 'input tap 540 960');
+  assertEqual(cmds.join('|'), 'input tap 540 960', '必须用一次性 adb 重发同一条命令');
+});
+
+test('_inject：两条路都失败时才抛错（不能静默吞掉）', async () => {
+  const { _inject } = require('../server/api/screen');
+  const adb = {
+    input: async () => { throw new Error('input 命令超时'); },
+    shell: async () => { throw new Error('device offline'); },
+  };
+  let threw = false;
+  try { await _inject(adb, 'input tap 1 1'); } catch (_) { threw = true; }
+  assert(threw, '都失败必须抛错，让前端能提示');
+});
+
+test('输入后立刻补一帧（2fps 轮询下点完要等 500ms，会被当成「点了没反应」）', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'ui', 'screen.js'), 'utf8');
+  const i = src.indexOf('finally {', src.indexOf('async _dispatch'));
+  assert(i > 0, '_dispatch 应有 finally 补帧');
+  assert(/_grab\(\)/.test(src.slice(i, i + 400)), 'finally 里必须触发 _grab()');
+  assert(/if \(this\._grabbing\) return/.test(src), '补帧与轮询不能并发（否则会打出两倍帧率）');
+});

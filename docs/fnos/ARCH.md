@@ -28,7 +28,7 @@
 | 硬件加速 | 优先 `/dev/kvm`（`-accel on`）；检测失败降级 `-accel off`（TCG，慢但能跑） | Q4 实测：`/dev/kvm` 属 `root:all.editor 0660`；`config/privilege` 的 `join-groups:["all.editor"]` 使包用户进组后 `KVM_WRITABLE` 校验通过；仍保留运行时检测以在未生效时降级 |
 | 图形渲染 | 默认 `-gpu off` 纯软件渲染（实测开机 30.9~31.3s） | Q4 实测更正：**不是权限决定论**。宿主侧 GL 的真实门槛是「一个带硬件 3D 的 X display」+ `renderD128` 可读，二者齐备时包用户也能 `-gpu host`（`Mesa Intel (ADL-N)`，27.6~28.6s）；但宿主自带的 `Xvnc`/`Xvfb` 都不支持 `-hw3d`，唯 KasmVNC 的 `Xkasmvnc` 支持且不在宿主 PATH 里 → 本包不自带，故默认 `off`。详见 IMPL 偏差 5 更正 |
 | 画面呈现 | `adb exec-out screencap -p` 取 PNG，HTTP 输出 `/api/screen/frame`，浏览器 `<img>` 轮询 2fps | 零依赖，无需 WebSocket（P2 可换） |
-| 输入注入 | 浏览器坐标 → 按 `wm size` 比例换算 → `adb shell input tap/swipe/text`；中文走 `adb shell ime`/base64 广播备用路径 | P0-8 |
+| 输入注入 | 浏览器坐标 → 按 `wm size` 比例换算 → `adb shell input tap/swipe/text`；中文走 `adb shell ime`/base64 广播备用路径。**手势判定用 CSS 像素而非设备像素**（`TAP_SLOP_CSS=10`），`<img>` 必须 `draggable=false` + `pointerdown` 里 `preventDefault`（否则原生 HTML5 drag 会发 `pointercancel`，swipe 永远发不出去）；按住 ≥600ms 发「原地按住」表达长按（0.2.5，见 IMPL 偏差 17） | P0-8 |
 | adb 客户端 | 复制 `core/adb.js`，仅改 `resolveAdb`（`adb.exe`→`adb`、Linux 路径）+ 内联 `input` 白名单（`pointer.js` 不迁移） | recon：唯一硬编码点在 `resolveAdb` |
 | 运行时获取 | 联网下载 `platform-tools`/`emulator`/`system-images;android-34;google_apis;x86_64` 到 `$TRIM_PKGVAR/runtime`，支持断点续传 + SHA256 | Q2 在线包 |
 | Node 运行时 | 见 §5.0：`cmd/main` 内 `resolve_node()` 探测，不要求用户手装 | 硬性约束 |

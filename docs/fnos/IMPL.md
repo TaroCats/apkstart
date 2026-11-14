@@ -867,6 +867,98 @@ denied)---disabling.`：它是 **Xvnc 进程里 Mesa** 打的（不是 emulator�
 
 **版本处置**：16.1 / 16.2 / 16.3 全在 `0.2.4`；三条都不需要改 fpk 结构，可直接覆盖安装。
 
+### 偏差 17 — 「只有画面不能操作」：`<img>` 原生拖拽打断手势 + 点击容差用错单位（0.2.5 修复）
+
+现象（用户原话）：「为什么只有画面不能操作？应该是可以操作的」。装上 0.2.4 后能看到模拟器
+画面、每 500ms 刷新，但点在画面上没有任何反应，拖也拖不动。
+
+**先说结论：后端没坏。** 直接打产品接口注入输入是通的：
+
+```
+A=288e5b9f4a39
+--- POST /api/screen/swipe {x1:540,y1:1400,x2:540,y2:500,durationMs:300} → {"ok":true}
+B=361b73042802        ← 画面真的变了
+--- POST /api/screen/tap {x:540,y:960} → {"ok":true}
+```
+
+所以范围收到前端 `ui/screen.js`。本机没有 Playwright 浏览器，用 `playwright-core`（不下载
+浏览器）+ 系统 Edge（`executablePath`）跑真实指针事件，并在页面里拦 `/api/screen/*` 请求，
+把「用户做了一个手势 → 到底有没有请求发出去」逐场景量化。修复**前**实测：
+
+```
+A 单击: 1 条 (tap {"x":539,"y":961})
+B 有 3px 手抖的单击: 0 条 (无)              ← 点了没反应
+C 拖拽上滑 400px: 0 条 (无)                 ← 滑不动
+D 拖拽后的单击: 1 条 (tap …)
+E 双击两下: 2 条
+F 长按 900ms: 1 条 (tap …)                  ← 长按被压成点击
+```
+
+两个独立真因：
+
+**17.1 `<img>` 默认 `draggable=true`，原生 HTML5 拖拽把自定义手势打断。**
+`<img>` 天生可拖。鼠标按住画面往外拖，浏览器启动 HTML5 drag，随即对元素发 `pointercancel`，
+`_dragStart` 被清空，`pointerup` 里「没有起点」直接 return —— **一次 swipe 都发不出去**
+（上面 C 的 0 条）。现场取证：第一次探针打出来的 `{"draggable":true,"events":["pointerdown","pointerup"]}`
+里根本没出现过 `pointermove`/`pointerup` 的配对，而修复后同一场景是
+`pointerdown,pointermove×12,pointerup`，且 `draggable:false`。
+
+修法（三条都要有，不同浏览器认的不一样）：`el.draggable = false` + `setAttribute('draggable','false')`；
+`pointerdown` 里 `ev.preventDefault()`（阻止默认拖拽与文本选中）；`dragstart` 上
+`preventDefault()` 兜底。CSS 侧补 `-webkit-user-drag: none` / `-webkit-touch-callout: none` /
+`touch-action: none`。
+
+**17.2 「点 vs 滑」的判定用设备像素，容差实际上只有 2.5 个浏览器像素。**
+旧代码：`if (dx < 8 && dy < 8) tap else swipe`，`dx/dy` 是**设备像素**。但这台机 1080×1920 的
+画面在桌面上是 344×612 CSS px，**1 CSS px ≈ 3.14 设备像素**，于是 8 设备像素 = 2.5 CSS px。
+鼠标/触控板点击自带的 2~4px 手抖都会被判成 swipe，再被 `Math.max(50, elapsed)` 抬到 50ms，
+最终发出的是 `input swipe x y x+3 y 50` —— 位移 3 个设备像素、50ms，屏幕上什么都不会发生。
+这就是「点了没反应」的第二个来源（上面 B 的 0 条）。
+
+修法：抽出纯函数 `classifyGesture({dx, dy, deviceDx, deviceDy, elapsed})`，**位移用 CSS 像素**
+判（`TAP_SLOP_CSS = 10`，与触摸屏的 click slop 同量级），并加一条兜底：设备像素位移
+`< 6` 时一律算点击（此时 swipe 必是空操作）。顺带补上长按：`input tap` 只是瞬时的 down+up，
+触发不了长按菜单，所以按住 ≥ 600ms 且没位移时发**原地按住** `input swipe x y x y <dur>`。
+
+修后同一套探针（真机 10.31.0.4，真实 Edge）：
+
+```
+img 属性 = {"draggable":false,"touchAction":"none","userDrag":"none"}
+A 单击:                     tap {"x":539,"y":961}
+B 有 3px 手抖的单击:        tap {"x":549,"y":968}          ← 不再被吞
+C 拖拽上滑 400px:           swipe {539,1589 → 539,334, dur 194}   ← 不再为 0 条
+D 拖拽后的单击:             tap {"x":539,"y":961}           ← 没被上一次拖拽污染
+E 双击两下:                 2 条 tap
+F 长按 900ms:               swipe {539,961 → 539,961, dur 902}     ← 原地按住
+G 很小的真拖拽（20px）:      swipe {539,961 → 539,899, dur 100}
+```
+
+设备端也确实动了（不是「请求发出去了」就完事）：
+
+| 场景 | 客观判据 | 结果 |
+| --- | --- | --- |
+| 桌面拖拽上滑 | 画面 PNG sha256 | `1ad36188ba1b → d5574f69387b`，开应用抽屉 |
+| 应用内单击（Flashlight 主开关） | 画面 PNG sha256 | `c374706496ad → a8025aab36fe →` 再点切回 |
+| 长按桌面 900ms | 画面 hash + 停留稳定性 | 变化且稳定 1.2s（弹层停住），`back` 后恢复 |
+| 直打 API 上滑 | 画面 hash 序列 | 连续 4 拍稳定到新 hash（抽屉打开） |
+
+**附带修的两个「看起来发了、其实没到设备」的路径**（`server/api/screen.js`）：
+
+- 常驻输入通道（`core/adb.js` 的 `_inputSession`）在模拟器重启后是断的，命令写进死管道
+  等于丢掉。抽出 `_inject(adb, cmd, {timeout})`：通道失败就退回一次性 `adb shell` 重发，
+  两条都失败才抛错（不能静默）。
+- `input swipe` 会阻塞到滑动结束，而通道超时是固定 4s，2.5s 的长滑动加上 adb 开销非常贴边，
+  一旦超时就把这条滑动判成失败。改为按滑动时长放宽（`dur + 6000`）。
+- 顺便：`ui/screen.js` 在每次输入后**立刻补一帧**（轮询只有 2fps，等下一拍最多 500ms，
+  点完看着像没反应）；补帧与轮询之间用 `_grabbing` 互斥，不会打出双倍帧率。
+
+**为什么之前没被拦**：`grep -rn "ScreenView\|screen.js\|_toDevice" test/*.js` 零命中 ——
+画面/输入这块前端逻辑**完全没有测试**。这次补了 13 个用例（`classifyGesture` 用上面探针的
+真实数据当夹具，加一条静态护栏断言「必须设 `draggable=false` 且 `pointerdown` 里
+`preventDefault`」，防止以后被顺手删掉）。
+
+**版本处置**：17.1 / 17.2 与后端兜底都在 `0.2.5`，纯前端 + 服务端脚本改动，覆盖安装即可。
+
 ### 附：已按真机实测校正的参数（非偏差，属对齐）
 
 - `buildArgs`：`-no-window -no-audio -no-boot-anim -gpu off -accel on -port <port> -no-snapshot-save`（`-gpu` 见偏差 5；`-accel off` 被此版本 emulator 拒绝，见偏差 5 附带结论）。
@@ -1065,8 +1157,8 @@ app/ui/config: {".url":{"apkstart-fnos.main":{...,"type":"url","port":"8890","ur
 [gpu.js / -gpu 模式裁决] 9 条：off、auto+全齐→host、auto 无 X→off、auto 无 render node→off、
   显式 host 无 X 降级、显式 swiftshader 无 X 也降级、显式 host 齐全尊重、gpuAutoEnable=false、未知模式回落
 
-[fnos-unit] 结果：82 通过，0 失败
-npm test 全链：run-tests 39 + engine-test 24 + auto-test 3 + fnos-unit 82 = 148 通过，0 失败
+[fnos-unit] 结果：96 通过，0 失败
+npm test 全链：run-tests 39 + engine-test 24 + auto-test 3 + fnos-unit 96 = 162 通过，0 失败
 ```
 
 0.2.3 / 0.2.4 新增的 18 条用例（端口同源与探测、xattr PAX 兜底、AVD 回收、adb HOME、emulator cwd）都在这一组里。
@@ -1101,6 +1193,6 @@ npm test 全链：run-tests 39 + engine-test 24 + auto-test 3 + fnos-unit 82 = 1
 - 启动误报（偏差 11）：`waitForPackage` 默认窗口 4s → **12s**（软件渲染下 splash→main 要 4~10s），`installer.js` 两处调用显式传值。真机验收：start 耗时 14793ms，`foregroundNow` 直接是应用包名。
 - ANR / 崩溃弹窗（偏差 12）：`current()` 改为**先窗口焦点、后 Activity 栈**，新增 `parseSystemDialog()` 识别 `Application Not Responding:` / `Application Error:` 弹窗窗口（`system` 归一成 `android`），弹窗优先级高于 resumed。真机验收：`mCurrentFocus=Window{33d43fa u0 Application Error: com.google.android.bluetooth}` 时返回 `{"foregroundPackage":"com.google.android.bluetooth","activity":"","source":"dialog","systemSurface":true}`，没有再把桌面谎报成前台。
 - fnpack：补 `maintainer_url` / `distributor_url`，删掉空 `preview_urls`；`platform` / `packages` 保持单元素 `x86`（无 arm 产物，不跟随参考源加 arm），见偏差 10。
-- 单测：`npm test` 全链 **148 通过 0 失败**（run-tests 39 + engine-test 24 + auto-test 3 + `test/fnos-unit.js` 82）。前台解析与弹窗识别的夹具**全部逐字取自真机 dump**，并有「采样命令必须含 topResumedActivity」「第一次采样必须是 window 焦点」的命令级断言，Android 14 null 回归与 ANR 谎报都可在不连真机时被拦住（见偏差 9b / 11）。0.2.3/0.2.4 补的端口与 AVD/HOME/cwd 用例走「真起监听进程 / 真杀进程 / 真 mkdir」而不是只断言源码，`netstat -ltn` 那条假修复就是被这类用例当场抓出来的。
+- 单测：`npm test` 全链 **162 通过 0 失败**（run-tests 39 + engine-test 24 + auto-test 3 + `test/fnos-unit.js` 96）。前台解析与弹窗识别的夹具**全部逐字取自真机 dump**，并有「采样命令必须含 topResumedActivity」「第一次采样必须是 window 焦点」的命令级断言，Android 14 null 回归与 ANR 谎报都可在不连真机时被拦住（见偏差 9b / 11）。0.2.3/0.2.4 补的端口与 AVD/HOME/cwd 用例走「真起监听进程 / 真杀进程 / 真 mkdir」而不是只断言源码，`netstat -ltn` 那条假修复就是被这类用例当场抓出来的。
 
 **IS_PASS: YES**

@@ -220,7 +220,8 @@ html, body {
   min-height: 360px;
   overflow: hidden;
 }
-.screen-img { max-width: 100%; max-height: 68vh; display: none; cursor: crosshair; user-select: none; image-rendering: auto; }
+/* draggable 由 JS 关掉；CSS 这层是兜底，防止「拖图片 → 开新标签页 / 选中文本」打断拖拽手势 */
+.screen-img { max-width: 100%; max-height: 68vh; display: none; cursor: crosshair; user-select: none; -webkit-user-select: none; -webkit-user-drag: none; -webkit-touch-callout: none; touch-action: none; image-rendering: auto; }
 .screen-img.active { display: block; }
 .screen-overlay {
   position: absolute; inset: 0;
