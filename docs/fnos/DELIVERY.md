@@ -288,6 +288,21 @@ emulator 日志: vulkan_mode_selected:host gles_mode_selected:host
 `<AVD>/config.ini` 的 `hw.gpu.mode` 改成 `host`，否则 emulator 按 AVD 里的 `off` 退回 lavapipe，
 会跑出「host 其实能用」的假阳性。
 
+**CI 侧一个小插曲（记下来免得下次重踩）**：`v0.2.4` 首轮 CI 的 `Release` 与 Linux 单测都绿，
+两个 Windows job 却红。拉日志看到是**新用例自身的跨平台问题**，不是包的问题：
+
+```
+✗ adb 的 HOME 必须可写：包用户没有家目录时不能照抄 process.env.HOME
+  HOME 不可用时应回落到 TRIM_PKGVAR：期望 "C:\\Users\\RUNNER~1\\…\\var"，实际 "/nonexistent-root-…/home"
+```
+
+用例原本用 `/nonexistent-root-<ts>/home` 造「建不出 `.android` 的 HOME」，在 macOS/Linux 上
+`/` 不可写所以必然失败；Windows 上 `/` 就是当前盘根、runner 又有管理员权限，反而真建成了 →
+`pickWritableHome()` 合理地返回了它。改成「父级放一个普通文件」（`blocker/home`）后三平台一致。
+另有一条同类问题（`/proc/…` 在 Windows 变成 `C:\proc\…` 能真建成）一并修掉，最终
+`65679e7` 三 job 全绿。**包的字节没有任何变化**（`pack.sh` 只打 `server/ core/ ui/`，
+`test/` 不进包，manifest checksum 与 `v0.2.4` 资产仍逐字一致），因此没有重新发版。
+
 ---
 
 ## 验证边界（如实标注，2026-11-14 更新）
