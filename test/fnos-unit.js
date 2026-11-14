@@ -1165,9 +1165,14 @@ test('emulator 子进程必须显式给 cwd，不能继承服务进程的 cwd', 
   assertEqual(mgr._spawnCwd(), temp, '_spawnCwd 应返回 APPTEMP');
   assert(fs.existsSync(temp), 'APPTEMP 应被创建（不存在时 spawn 会直接失败）');
 
-  // 建不出来的路径要退回 undefined（= 继承 cwd），不能抛错阻断启动
+  // 建不出来的路径要退回 undefined（= 继承 cwd），不能抛错阻断启动。
+  // 这里用「父级是一个普通文件」来造跨平台都不可能建成的路径：早先写死
+  // `/proc/nonexistent-apkstart/tmp`，在 Windows 上会被当成 `C:\proc\…` 真建出来，
+  // CI 的 Windows job 立刻红（而 macOS/Linux 上恰好 EACCES，本地看不出来）。
+  const blocker = path.join(tmp, 'blocker');
+  fs.writeFileSync(blocker, 'x');
   const bad = new EmulatorManager({
-    paths: { APPTEMP: '/proc/nonexistent-apkstart/tmp', APPDATA: tmp },
+    paths: { APPTEMP: path.join(blocker, 'tmp'), APPDATA: tmp },
     provision: {},
     settingsGetter: () => ({ emulator: {} }),
     xserver: {},
