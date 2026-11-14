@@ -4,7 +4,7 @@
 |---|---|
 | 上游仓库 | https://github.com/TaroCats/apkstart |
 | 目标平台 | 飞牛 fnOS（x86，KVM） |
-| **当前可交付版本** | **`0.2.3`**（见下方发布表首行；本表其余数值是 `0.1.0` 首次交付的基线快照，保留用于对照） |
+| **当前可交付版本** | **`0.2.4`**（见下方发布表首行；本表其余数值是 `0.1.0` 首次交付的基线快照，保留用于对照） |
 | 产物 | `dist/apkstart-fnos_0.1.0_x86.fpk` |
 | 大小 | 90,722 B |
 | sha256 | `cee439f852e7e95851c8c75475304fa585897c43a3c72617e88a2febc791f21c` |
@@ -17,15 +17,22 @@
 
 | 版本 | 产物 | 大小 | sha256 | 发布时间 |
 |---|---|---|---|---|
+| `0.2.4` | `apkstart-fnos_0.2.4_x86.fpk` | 105,445 B | `c7a010da3752d5652ea51a5ae72fd88dcdec5b0eae89a62b34586131e0ed84b8` | 2026-11-14T07:28Z |
 | `0.2.3` | `apkstart-fnos_0.2.3_x86.fpk` | 102,180 B | `4a3df53b9f000b701cdc6571a61d2b7a87c1d8cca4e7c77b8462b57b755d8166` | 2026-11-14T06:37Z |
 | `0.2.2` | `apkstart-fnos_0.2.2_x86.fpk` | 100,452 B | `8b9a7f318bde97c8e085c1e9c709d237bbf75bdd37b55bed5f0018ee2b943e2a` | 2026-11-14T05:55Z |
 | `0.2.1` | `apkstart-fnos_0.2.1_x86.fpk` | 99,933 B | `d2219092bc5c80cd8a4b38a5cccc35b73d7b2591919f982dc2711644fe076ae3` | 2026-11-14T05:34Z |
 | `0.2.0` | `apkstart-fnos_0.2.0_x86.fpk` | 99,027 B | `ec0f9581d8e5fec2e5393192cad76cf59a51af4c0d753316ea837c1ef37723af` | 2026-11-14T04:37Z |
 | `0.1.0` | `apkstart-fnos_0.1.0_x86.fpk` | 90,722 B | `cee439f852e7e95851c8c75475304fa585897c43a3c72617e88a2febc791f21c` | 2026-11-13T20:16Z |
 
-> 五条 release 同时保留在仓库根 `fnpack.json` 里（`gen-fnpack.js` 是**增量合并**，不是覆盖），
-> `0.1.0` / `0.2.0` / `0.2.1` / `0.2.2` 可随时回滚下载（只有 `0.2.3` 既装得上又起得来）。
+> 六条 release 同时保留在仓库根 `fnpack.json` 里（`gen-fnpack.js` 是**增量合并**，不是覆盖），
+> `0.1.0` / `0.2.0` / `0.2.1` / `0.2.2` / `0.2.3` 可随时回滚下载（只有 `0.2.4` 既装得上、起得来、
+> 模拟器又能真正开机）。
 > `0.2.2` 的体积比 `0.2.1` 多 519 B，来源是新增的根级 `app.tgz` 头部与 `cmd/` 两处修正，不是功能增量。
+>
+> `0.2.4` 同样验过 CI 产物：下载 Release 资产 → `shasum -a 256` 与 GitHub asset digest 逐字一致
+> （`c7a010da…`）→ `node build/validate-package.js` → `包结构校验通过: 根 21 条目 / app.tgz 43 条目`
+> → 从包里解出 `manifest` 确认 `version=0.2.4` / `port=18990`，解出 `ui/config` 确认 `"port":"18990"`
+> → 包内 `LIBARCHIVE.xattr` PAX 头计数 **0**。`fnpack.json` 由 CI 自动同步（`ab3dc7b`）。
 >
 > **`0.2.2` 的 CI 产物已就地校验过结构**（不是只验本地包）：把 Release 上的
 > `apkstart-fnos_0.2.2_x86.fpk` 下回来跑 `node build/validate-package.js`，输出
@@ -53,16 +60,19 @@
 > **`0.2.2` 能装，但可能起不来**：它把默认端口写死 8890，而目标机的 8890 被 Docker 里的
 > uvicorn 长期占用（`uvicorn app.main:app --port 8890`），服务 bind 不上、进程秒退（IMPL 偏差 15）。
 >
-> **能装且能起来的只有 `0.2.3`**：`0.2.0` wizard 坏、`0.2.1` 包结构坏、`0.2.2` 端口撞车，
-> 直接装 `0.2.3` 即可（默认端口 18990，端口跟随 `ui/config`，撞了会在启动前说清是谁占的）。
+> **能装且能起来的只有 `0.2.4`**：`0.2.0` wizard 坏、`0.2.1` 包结构坏、`0.2.2` 端口撞车、
+> `0.2.3` 装得上也能起服务但**模拟器开不起来**（同 AVD 遗留占用 / adb HOME 不可写 / emulator
+> 继承了不可读的 cwd，三条叠在一起，见 IMPL 偏差 16）。直接装 `0.2.4` 即可——它同时带 0.2.3
+> 的端口修正（默认 18990，跟随 `ui/config`，撞了会在启动前说清是谁占的）。
 >
 > **版本口径**：本文档「v0.1」指首个 fpk 包 `0.1.0`；「v0.2」指 GPU 改造版 `0.2.0`；
 > `0.2.1` 是修 wizard 的补丁版（顶层改数组）；`0.2.2` 是修包结构的补丁版（`app/` → `app.tgz`）；
-> `0.2.3` 是修端口冲突的补丁版（默认 8890 → 18990，端口以 `ui/config` 为单一真源）。
+> `0.2.3` 是修端口冲突的补丁版（默认 8890 → 18990，端口以 `ui/config` 为单一真源）；
+> `0.2.4` 是修模拟器启动链的补丁版（AVD 回收 + adb HOME + emulator cwd，GPU 加速真机跑通）。
 > 上游 apkstart 自身的 `0.2.7` 是另一条号，与 fpk 版本无关；`server/config.js` 的 `VERSION`
 > 默认值仅在未注入 `APKSTART_VERSION` 时兜底，`pack.sh` 会在计算 checksum 前注入实际版本。
 
-一句话结论：**四阶段全部落地，fpk 已在真实 fnOS 上按 fpk 生命周期契约完成端到端安装、运行、升级、卸载验证；CI 与 fnDepot 发布元数据齐备，`0.2.2` 起包结构符合 App Center 的 `app.tgz` 要求，`0.2.3` 起默认端口不再与宿主已有服务撞车。** 仅剩两项依赖外部条件（App Center 图形界面点一次装完、fnDepot 客户端收录）未在本机闭环，已在文末「验证边界」逐项标注。
+一句话结论：**四阶段全部落地，fpk 已在真实 fnOS 上按 fpk 生命周期契约完成端到端安装、运行、升级、卸载验证；CI 与 fnDepot 发布元数据齐备，`0.2.2` 起包结构符合 App Center 的 `app.tgz` 要求，`0.2.3` 起默认端口不再与宿主已有服务撞车，`0.2.4` 起模拟器能真正开机并跑在 GPU 上（`gpu=host`，`adbConnected=true`）。** 用户已通过 App Center 图形界面实际装成 `0.2.3` 并拉起服务，这条外部依赖随之闭环；仅剩 fnDepot 客户端收录未在本机验证，已在文末「验证边界」标注。
 
 ---
 
@@ -249,9 +259,34 @@ qemu 进程 `Uid: 926`（即包用户 `apkstart-fnos`），日志含 `Selecting 
 
 用 `setsid … &` 把模拟器丢后台再测，包用户下**必崩**；同一条命令前台跑、或由 Node `spawn()` 拉起则**正常**。初版「包用户下 `-gpu host` 必崩」的结论就是这个测试形态造成的假象，白花了大量时间在权限上。**结论：验收必须走产品真实启动路径，手工命令行只能用于单点排查。**
 
-### 目标机当前状态（v0.2 改造后）
+### 目标机当前状态（0.2.4 验证后）
 
-`settings.json` 的 `emulator.gpu` = `auto`、`xserverPath` = `""`；包用户组 `920(apkstart-fnos),44(video),105(render),992(all.editor)`；`$TRIM_PKGVAR/runtime/xserver/Xkasmvnc` 已投放（运维侧动作，非包内文件）；`/tmp/.X9-lock` 与 `:9` socket 在 `stop()` 后不再残留（只剩宿主自己的 `X99`）；无残留 qemu / X server 进程。
+`settings.json` 的 `emulator.gpu` = `auto`、`xserverPath` = `""`；包用户组 `920(apkstart-fnos),44(video),105(render),992(all.editor)`；`$TRIM_PKGVAR/runtime/xserver/Xkasmvnc` 已投放（运维侧动作，非包内文件）；`/tmp/.X9-lock` 与 `:9` socket 在 `stop()` 后不再残留（只剩宿主自己的 `X99`）；无残留 qemu / X server 进程；我此前手工调试留下的 root adb server（`5037`）与 `/tmp` 下的测试部署已清理。
+
+### 0.2.4 模拟器启动链真机验证（2026-11-14）
+
+同一天连做三轮，每轮都以「真实包用户 uid 926 + 服务 → spawn 的产品路径」为准：
+
+| 轮次 | 现象 | 结论 |
+|---|---|---|
+| 1 | `FATAL Running multiple emulators with the same AVD`（用户报的原文） | 遗留 qemu 占着 AVD；`_releaseAvd` 修好后开机正常（`bootMs` 32s） |
+| 2 | 开机成功但 `adbConnected:false`，adb 原文 `Cannot mkdir '/home/apkstart-fnos/.android'` | 包用户无家目录；`pickWritableHome()` 修好后 `adb devices` → `emulator-5554 device` |
+| 3 | 一切正常但 `gpu.mode` 永远 `off`（`fallback-after-failure`） | emulator 继承了不可读的 `cwd`（从 `/root` 拉起服务）；`_spawnCwd()` 修好后 `gpu=host(auto-host)` |
+
+第 3 轮的最终现场（**故意**保留原本必失败的环境：服务从 `/root` 启动）：
+
+```
+[gpu] 自动检测到硬件 3D X display 与 render node，启用 -gpu host（DISPLAY=:9）
+[start] KVM available=true writable=true accel=on gpu=host display=:9 cwd=/vol2/@appdata/apkstart-fnos/tmp
+[boot] boot_completed in 27614ms
+status: emulator=running  gpu=host(auto-host)  adbConnected=true  bootMs=27614
+emulator 日志: vulkan_mode_selected:host gles_mode_selected:host
+              Graphics Adapter … (Mesa Intel(R) Graphics (ADL-N))
+```
+
+即「GPU 加速」不再只是配置项上的字样。注意事项写进了 IMPL 偏差 16.3：手工重放必须先把
+`<AVD>/config.ini` 的 `hw.gpu.mode` 改成 `host`，否则 emulator 按 AVD 里的 `off` 退回 lavapipe，
+会跑出「host 其实能用」的假阳性。
 
 ---
 
@@ -259,9 +294,10 @@ qemu 进程 `Uid: 926`（即包用户 `apkstart-fnos`），日志含 `Selecting 
 
 | 项 | 状态 |
 |---|---|
-| **真实 tag 触发的 GitHub Actions** | ✅ **已实际跑过多次**（`v0.2.0` / `v0.2.1` / `v0.2.2`），三 job 全绿；`Sync fnpack.json` 每次自动提交回 `main`（`8dd063d` 为 0.2.2 的同步提交） |
-| **Release 资产与 sha256** | ✅ `0.2.2` 资产 100,452 B / `8b9a7f31…`，与 `fnpack.json` 逐字一致；Release body 用 tag 注释正文（0.2.1 修掉「退化成 commit 首行」的问题后一直正常） |
-| **App Center 图形界面点击安装** | ⚠️ **部分覆盖**：`0.2.0` 走到 wizard 解析（100610）、`0.2.1` 走到 `app.tgz` 解包（10107），说明调度逻辑已被真实触发过；**`0.2.2` 能否装到「安装完成」仍待点一次确认** |
+| **真实 tag 触发的 GitHub Actions** | ✅ **已实际跑过六次**（`v0.1.0`～`v0.2.4`），`Release` 与 `CI` 全绿；`Sync fnpack.json` 每次自动提交回 `main`（`8dd063d` / `3ec0d3d` / `ab3dc7b` 分别对应 0.2.2 / 0.2.3 / 0.2.4） |
+| **Release 资产与 sha256** | ✅ `0.2.4` 资产 105,445 B / `c7a010da…`，与 GitHub asset digest、`fnpack.json` 逐字一致；Release body 用 tag 注释正文 |
+| **App Center 图形界面点击安装** | ✅ **已闭环**：用户通过 App Center 装成 `0.2.3`，服务被平台拉起监听 `18990`（`/vol2/@appcenter/apkstart-fnos/server/index.js`，`/api/health` 返回 `version 0.2.3`），随后真机报障的正是模拟器启动链——说明安装、解包、服务拉起三环都由平台真实调度过 |
+| **0.2.4 通过 App Center 覆盖安装** | ⚠️ 待用户点一次：包结构与 0.2.3 同构（`validate-package.js` 断言一致），差异只在 `server/` 三个文件，风险面很小 |
 | **fnDepot 客户端实际收录** | ⚠️ 未验：需要在客户端里「添加源」指向本仓库 `fnpack.json`，本地只能证明元数据符合 V2 schema |
 
 ### 手工安装的等价路径（无 App Center 时）

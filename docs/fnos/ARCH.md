@@ -14,7 +14,7 @@
 - 后端单进程，端口 **18990**，监听 `0.0.0.0`；adb server 与 emulator console **只绑 `127.0.0.1`**。
   （0.2.3 前默认 8890，实测在目标机被 Docker 里的 uvicorn 长期占用，见 IMPL 偏差 15）
 - 解析层 `core/{zip,axml,arsc,apk,png}.js` **原样复制，不改逻辑**。
-- 单实例共享一台模拟器跑多应用（Q3）；在线包，不含运行时二进制（Q2）；P0 不做鉴权（Q1）；`config/privilege` 声明 `join-groups:["all.editor","render","video"]` 即获得 `/dev/kvm`（属组 `all.editor`）与 `/dev/dri/renderD128`（属组 `render`）读写权，运行时仍检测可写性（Q4）；图形渲染默认 `gpu: 'auto'`——**权限早已不是瓶颈**，唯一门槛是宿主有没有「带硬件 3D 的 X display」（只有 `Xkasmvnc` 支持 `-hw3d`）；因 GPL-2.0 与其 deb 依赖，二进制**不随包携带**，由运维投放到 `$TRIM_PKGVAR/runtime/xserver/`，投放了就自动上 `-gpu host`（实测 −2.86s / −12.0%），没投放就安静回落 `off`，详见 IMPL 偏差 5 改造方案（Q4）；`maintainer` 保留 `RoutineMiku`、`distributor: TaroCats`（Q5）。
+- 单实例共享一台模拟器跑多应用（Q3）；在线包，不含运行时二进制（Q2）；P0 不做鉴权（Q1）；`config/privilege` 声明 `join-groups:["all.editor","render","video"]` 即获得 `/dev/kvm`（属组 `all.editor`）与 `/dev/dri/renderD128`（属组 `render`）读写权，运行时仍检测可写性（Q4）；图形渲染默认 `gpu: 'auto'`——**权限早已不是瓶颈**，门槛是宿主有没有「带硬件 3D 的 X display」（只有 `Xkasmvnc` 支持 `-hw3d`）**且 emulator 子进程的 cwd 对包用户可读**（0.2.4 实测补充：cwd 继承成 `/root` 时 host 会静默失败，见 IMPL 偏差 16.3）；因 GPL-2.0 与其 deb 依赖，二进制**不随包携带**，由运维投放到 `$TRIM_PKGVAR/runtime/xserver/`，投放了就自动上 `-gpu host`（实测 −2.86s / −12.0%），没投放就安静回落 `off`，详见 IMPL 偏差 5 改造方案（Q4）；`maintainer` 保留 `RoutineMiku`、`distributor: TaroCats`（Q5）。
 
 ---
 
