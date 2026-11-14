@@ -1125,8 +1125,12 @@ test('adb 的 HOME 必须可写：包用户没有家目录时不能照抄 proces
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'adbhome-'));
   const saved = { HOME: process.env.HOME, TRIM_PKGVAR: process.env.TRIM_PKGVAR };
   try {
-    // 父目录不可写的 HOME：mkdir 一定失败（/ 下普通用户建不了目录）
-    process.env.HOME = `/nonexistent-root-${Date.now()}/home`;
+    // 「建不出 `.android` 的 HOME」要跨平台造：父级放一个普通文件。
+    // 早先写死 `/nonexistent-root-…/home`，Windows 会真把它建到当前盘根下（CI 就是
+    // runner 管理员权限），`pickWritableHome()` 于是返回它 → 断言红。
+    const blocker = path.join(tmp, 'homeblocker');
+    fs.writeFileSync(blocker, 'x');
+    process.env.HOME = path.join(blocker, 'home');
     process.env.TRIM_PKGVAR = path.join(tmp, 'var');
     assertEqual(pickWritableHome(), path.join(tmp, 'var'), 'HOME 不可用时应回落到 TRIM_PKGVAR');
     assert(fs.existsSync(path.join(tmp, 'var', '.android')), '.android 目录应被创建');
