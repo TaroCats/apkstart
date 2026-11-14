@@ -28,6 +28,17 @@
       "is_docker": false,
       "service_port": "18990",
       "releases": {
+        "0.2.3": {
+          "changelog": "0.2.3：修默认端口冲突 —— 8890 在目标机被 Docker 里的 uvicorn 长期占用，服务 bind 不上。默认端口改 18990，端口来源改为 TRIM_SERVICE_PORT → ui/config（单一真源） → 默认值；cmd/main 启动前探测占用并点名占用者与改法；config/resource 的 port 与 ui/config 同源注入；顺带修 macOS 打包的 xattr PAX 头（--no-xattrs 才有效，0.2.2 的 --no-mac-metadata 未生效）。0.2.3 是能装且能起来的版本。",
+          "updated_at": "2026-11-14T06:37:20Z",
+          "packages": {
+            "x86": {
+              "download_url": "https://github.com/TaroCats/apkstart/releases/download/v0.2.3/apkstart-fnos_0.2.3_x86.fpk",
+              "sha256": "4a3df53b9f000b701cdc6571a61d2b7a87c1d8cca4e7c77b8462b57b755d8166",
+              "size": 102180
+            }
+          }
+        },
         "0.2.2": {
           "changelog": "0.2.2：修 App Center 装不上（code 10107）—— fpk 根级的 app/ 目录改为根级 app.tgz（嵌套压缩包），平台只认后者。顺带修 cmd/main 的 adb 路径（应在数据根 runtime/ 而非代码根）、cmd/install_init 的 cmd 目录推导；新增 build/validate-package.js 产物结构校验，0.2.1 的真实日志形态已做成回归用例。0.2.0（wizard 坏）与 0.2.1（包结构坏）资产均不覆盖，装 0.2.2。",
           "updated_at": "2026-11-14T05:55:53Z",
