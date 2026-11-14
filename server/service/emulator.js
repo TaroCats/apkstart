@@ -21,6 +21,55 @@ const BOOT_TIMEOUT_MS = 180000;
 const LOG_LIMIT = 1000;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+/** 正则转义（AVD 名来自 settings，不能假设它只含安全字符）。 */
+function escapeRe(s) {
+  return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * 扫描「仍持有同一 AVD 的模拟器进程」（IMPL 偏差 16）。
+ *
+ * 为什么读 `/proc/<pid>/cmdline` 而不调 `pgrep -f`：
+ *   ① 不依赖 procps 是否装了；② `pgrep -f` 会把本进程自己的命令行（我们的日志里
+ *   就会打印 `-avd apkstart`）也算命中，等于自杀；③ 不需要再解析一遍 ps 的列。
+ *
+ * 传给 emulator 的 `-avd` 是**整词**匹配：`-avd apkstart` 不能命中 `-avd apkstart2`。
+ *
+ * @param {string} avdName
+ * @param {{procRoot?: string, selfPid?: number}} [opts] 测试用：喂人造 /proc 目录
+ * @returns {Array<{pid: number, cmd: string}>}
+ */
+function scanAvdEmulators(avdName, opts = {}) {
+  const hits = [];
+  const want = String(avdName || '').trim();
+  if (!want) return hits;
+  const procRoot = opts.procRoot || '/proc';
+  const selfPid = opts.selfPid || process.pid;
+  const re = new RegExp(`(?:^|\\s)-avd\\s+${escapeRe(want)}(?:\\s|$)`);
+
+  let names = [];
+  try {
+    names = fs.readdirSync(procRoot);
+  } catch (_) {
+    return hits; // 非 Linux（本地跑测试）没有 /proc，直接放弃
+  }
+  for (const name of names) {
+    if (!/^\d+$/.test(name)) continue;
+    const pid = Number(name);
+    if (pid === selfPid) continue;
+    let cmd = '';
+    try {
+      cmd = fs.readFileSync(path.join(procRoot, name, 'cmdline'), 'utf8').replace(/\0/g, ' ').trim();
+    } catch (_) {
+      continue; // 读不到（权限 / 已退出）就当没有
+    }
+    if (!cmd || !/qemu-system/.test(cmd)) continue;
+    if (!re.test(cmd)) continue;
+    hits.push({ pid, cmd });
+  }
+  return hits;
+}
+
 /**
  * 开机后需要禁用的系统组件（ARCH 追加需求，IMPL 偏差 9）。
  *
@@ -345,8 +394,18 @@ class EmulatorManager {
   }
 
   _spawnEnv(extra = {}) {
+    // HOME 必须指向**可写**目录：包用户没有自己的家目录（/home/apkstart-fnos 不存在，
+    // 父目录 root 属主也建不出来），emulator 会报
+    //   Failed to create /home/apkstart-fnos for shader cache (Permission denied)
+    // 然后关掉 shader cache。指向数据根既解决权限，也避免把缓存写进系统目录。
+    const home = this.paths.APPHOME || this.paths.APPDATA;
+    try {
+      fs.mkdirSync(home, { recursive: true });
+    } catch (_) { /* 建不出来就让 emulator 自己降级，不阻断启动 */ }
     return {
       ...process.env,
+      HOME: home,
+      XDG_CACHE_HOME: path.join(home, '.cache'),
       ANDROID_AVD_HOME: this.paths.AVD,
       ANDROID_SDK_ROOT: this.paths.RUNTIME,
       ANDROID_HOME: this.paths.RUNTIME,
@@ -361,6 +420,109 @@ class EmulatorManager {
       // 绝不能传一个假值：`-gpu != off` 且 DISPLAY 不可连时 QEMU 2s 内崩。
       ...extra,
     };
+  }
+
+  /**
+   * emulator 子进程的工作目录。**必须显式给，不能继承服务进程的 cwd。**
+   *
+   * 真机（10.31.0.4）踩坑：管理员用 `su -s /bin/sh apkstart-fnos -c …` 从 `/root`
+   * 启动服务时，cwd 继承成 `/root`（0700 root），包用户连 `..`/`.` 都读不了 →
+   * QEMU 起 2s 内静默退出，日志里只有一句
+   *   WARNING | QEMU main loop exits abnormally with code 1
+   * 前后**没有任何错误行**；而 `-gpu off` 同一时刻能正常开机 → 很容易误判成
+   * 「fnOS 显卡不能让 emulator 用」。实测同一台机：cwd=/root → host 必失败；
+   * cwd=/ → host 正常（`vulkan_mode_selected:host`，boot 28.7s）。
+   * 结论：包用户的可预期性不能依赖平台/运维怎么拉起服务。
+   *
+   * @returns {string|undefined} 建不出来时返回 undefined（退回继承 cwd，不阻断启动）
+   */
+  _spawnCwd() {
+    const dir = this.paths.APPTEMP || this.paths.APPDATA;
+    if (!dir) return undefined;
+    try {
+      fs.mkdirSync(dir, { recursive: true });
+      return dir;
+    } catch (_) {
+      return undefined;
+    }
+  }
+
+  /** AVD 目录（<AVD>/<name>.avd）。 */
+  _avdDir(avdName) {
+    return path.join(this.paths.AVD, `${avdName}.avd`);
+  }
+
+  /** AVD 目录下的锁文件（hardware-qemu.ini.lock / multiinstance.lock 等）。 */
+  _avdLockFiles(avdName) {
+    try {
+      return fs
+        .readdirSync(this._avdDir(avdName))
+        .filter((f) => f.endsWith('.lock'))
+        .map((f) => path.join(this._avdDir(avdName), f));
+    } catch (_) {
+      return [];
+    }
+  }
+
+  /**
+   * 启动前「腾出」这个 AVD（IMPL 偏差 16）。
+   *
+   * 现场：上一个服务实例没停干净，它的 qemu 还活着并持有 AVD（root 身份），
+   * 我们再 spawn 就被 emulator 直接判死：
+   *   FATAL | Running multiple emulators with the same AVD is an experimental feature.
+   *   FATAL | Please use -read-only flag to enable this feature.
+   * 然后 GPU 降级逻辑以为是「host 不行」，又用 -gpu off 重试一次，同样撞死——
+   * 白等一轮、日志还把真正的因由埋在两段启动输出里。
+   *
+   * 处理顺序：SIGTERM → 等 → SIGKILL → 等 → 仍在则抛 CONFLICT（无权杀别人的进程时，
+   * 唯一正确的做法是把话说清楚，而不是反复重试）。
+   * 顺带清掉死进程留下的陈旧锁文件：它们会让 emulator 误以为已有实例。
+   */
+  async _releaseAvd(avdName, { termWaitMs = 6000, procRoot } = {}) {
+    const selfPid = this._child ? this._child.pid : undefined;
+    // procRoot 仅供单测注入伪造的 /proc（真机上永远是默认 /proc）
+    const scan = () => scanAvdEmulators(avdName, { selfPid, procRoot });
+
+    const orphans = scan();
+    if (orphans.length) {
+      for (const o of orphans) {
+        this._pushLog(`[avd] 发现同一 AVD 的遗留模拟器 pid=${o.pid}，先回收：${o.cmd.slice(0, 160)}`);
+        try {
+          process.kill(o.pid, 'SIGTERM');
+        } catch (e) {
+          if (e && e.code === 'EPERM') this._pushLog(`[avd] 无权结束 pid=${o.pid}（EPERM）`);
+        }
+      }
+      const deadline = Date.now() + termWaitMs;
+      while (Date.now() < deadline && scan().length) await sleep(200);
+      for (const o of scan()) {
+        this._pushLog(`[avd] pid=${o.pid} 未响应 SIGTERM，改用 SIGKILL`);
+        try {
+          process.kill(o.pid, 'SIGKILL');
+        } catch (_) { /* 记录在后面统一处理 */ }
+      }
+      if (scan().length) await sleep(300);
+
+      const still = scan();
+      if (still.length) {
+        const who = still.map((x) => `pid=${x.pid}`).join('、');
+        const err = new Error(
+          `另一个使用 AVD「${avdName}」的模拟器还在运行（${who}），当前用户无权结束它。` +
+            `请先停掉占用该 AVD 的实例（例如停掉另一个 ApkStart 服务，或手动 kill ${still[0].pid}）后再启动。`
+        );
+        err.code = 'CONFLICT';
+        this._pushLog(`[avd] ${err.message}`);
+        throw err;
+      }
+      this._pushLog('[avd] 遗留模拟器已回收');
+    }
+
+    for (const f of this._avdLockFiles(avdName)) {
+      try {
+        fs.unlinkSync(f);
+        this._pushLog(`[avd] 清理陈旧锁 ${path.basename(f)}`);
+      } catch (_) { /* 删不掉不影响启动，emulator 会自己判断 */ }
+    }
   }
 
   /**
@@ -391,7 +553,21 @@ class EmulatorManager {
       return await this._startOnce({ wipe, gpuMode: gpu.mode, display: this.xserver.displayEnv() });
     } catch (e) {
       if (gpu.mode === 'off') throw e;
+      // AVD 被另一个实例（或孤儿进程）占着，换 -gpu off 一样起不来。
+      // 白白多跑一轮 180s 的等待，还会让日志里出现两段启动输出、掩盖真正的原因。
+      if (e.code === 'CONFLICT') {
+        this._pushLog('[gpu] AVD 冲突与 GPU 无关，不做 -gpu off 重试');
+        try { await this.xserver.stop(); } catch (_) { /* ignore */ }
+        throw e;
+      }
       this._pushLog(`[gpu] -gpu ${gpu.mode} 启动失败（${e.message}），自动降级 off 重试`);
+      // 「一句 QEMU main loop exits abnormally、前后全无错误行」是 QEMU 在**极早期**
+      // 退出的特征（cwd 读不了 / AVD 锁 / 端口），不是显卡能力问题。留条线索，
+      // 省得下次又去翻 Mesa 版本（真机踩过：真因是 cwd 继承成 /root）。
+      if (/进程已退出/.test(String(e.message || ''))) {
+        this._pushLog('[gpu] 提示：若上方只有「QEMU main loop exits abnormally」且无其他错误，'
+          + '先看 [start] 行里的 cwd 是否可被包用户读取，再排查 AVD 锁与 5554 端口');
+      }
       try { await this.stop(); } catch (_) { /* ignore */ }
       await this.xserver.stop();
       this.state = 'stopped';
@@ -449,6 +625,16 @@ class EmulatorManager {
     const cfg = this._settings();
     const kvm = checkKvmAccess();
     const avdName = cfg.name || 'apkstart';
+    // 先把 AVD 腾出来：遗留实例的 qemu 还活着时，emulator 会直接 FATAL 退出，
+    // 而错误文案（"multiple emulators with the same AVD"）不会告诉我们是谁占了。
+    // 失败要把状态落到 error：否则调用方看到的是「一直在 starting」，前端转圈不停。
+    try {
+      await this._releaseAvd(avdName);
+    } catch (e) {
+      this.state = 'error';
+      this.error = e.message;
+      throw e;
+    }
     this.ensureAvd({ wipe, gpuMode });
 
     const bin = this._emulatorBin();
@@ -471,10 +657,12 @@ class EmulatorManager {
     });
 
     this._pushLog(`[start] ${bin} ${args.join(' ')}`);
-    this._pushLog(`[start] KVM available=${kvm.available} writable=${kvm.writable} accel=${kvm.writable ? 'on' : 'off'} gpu=${gpuMode}${display ? ` display=${display}` : ''}`);
+    // cwd 一并打出来：`-gpu host` 静默失败时，第一个要排除的就是「cwd 包用户读不了」。
+    const cwd = this._spawnCwd();
+    this._pushLog(`[start] KVM available=${kvm.available} writable=${kvm.writable} accel=${kvm.writable ? 'on' : 'off'} gpu=${gpuMode}${display ? ` display=${display}` : ''} cwd=${cwd || '(继承)'}`);
 
     const env = this._spawnEnv(display ? { DISPLAY: display } : {});
-    const child = spawn(bin, args, { env, stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(bin, args, { env, cwd, stdio: ['ignore', 'pipe', 'pipe'] });
     this._child = child;
     this.pid = child.pid;
 
@@ -626,6 +814,7 @@ class EmulatorManager {
 
 module.exports = {
   EmulatorManager,
+  scanAvdEmulators,
   EMULATOR_PORT,
   BOOT_TIMEOUT_MS,
   HARDENING_BLUETOOTH_PKG,

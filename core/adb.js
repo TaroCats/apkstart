@@ -121,6 +121,31 @@ function parseStatList(text) {
   return rows;
 }
 
+/**
+ * 挑一个「真的能写」的 HOME（IMPL 偏差 16）。
+ *
+ * 为什么需要：fnOS 的包用户没有家目录（`/home/apkstart-fnos` 不存在，父目录属于 root，
+ * 自己也建不出来）。adb 一启动就要 `mkdir $HOME/.android`，建不出来就直接 abort：
+ *   F adb  : adb_utils.cpp:315 Cannot mkdir '/home/apkstart-fnos/.android': No such file or directory
+ * 表现上就是「模拟器明明开机成功，adb devices 却一直获取失败」，非常难往权限上想。
+ *
+ * 顺序：现成 HOME（能写就用，保住已有 adbkey）→ TRIM_PKGVAR / TRIM_APPDATA（包数据根，
+ * 必然可写）→ 临时目录兜底。返回空串表示都不行，此时交给 adb 自己报错。
+ */
+function pickWritableHome() {
+  const cands = [process.env.HOME, process.env.TRIM_PKGVAR, process.env.TRIM_APPDATA, path.join(os.tmpdir(), 'apkstart-adb-home')];
+  for (const c of cands) {
+    if (!c) continue;
+    try {
+      const dir = path.join(c, '.android');
+      fs.mkdirSync(dir, { recursive: true });
+      fs.accessSync(dir, fs.constants.W_OK);
+      return c;
+    } catch (_) { /* 下一个 */ }
+  }
+  return '';
+}
+
 class AdbClient {
   constructor({ adbPath, serial }) {
     this.adbPath = adbPath || 'adb';
@@ -150,7 +175,11 @@ class AdbClient {
   }
 
   _adbEnv() {
-    return { ...process.env, ANDROID_ADB_SERVER_PORT: process.env.ANDROID_ADB_SERVER_PORT || '5044' };
+    const env = { ...process.env, ANDROID_ADB_SERVER_PORT: process.env.ANDROID_ADB_SERVER_PORT || '5044' };
+    // HOME 必须可写：否则 adb 连 `mkdir $HOME/.android` 都做不到，直接 abort（见 pickWritableHome）
+    const home = pickWritableHome();
+    if (home) env.HOME = home;
+    return env;
   }
 
   exec(args, { timeout = 30000, withSerial = true, binary = false } = {}) {
@@ -807,4 +836,11 @@ class AdbClient {
   }
 }
 
-module.exports = { AdbClient, AdbError, parseStatList, friendlyInstallError, friendlyLaunchError };
+module.exports = {
+  pickWritableHome,
+  AdbClient,
+  AdbError,
+  parseStatList,
+  friendlyInstallError,
+  friendlyLaunchError,
+};

@@ -196,6 +196,8 @@ disable_authorization_path=true
 
 **方法论教训（花了最多时间的一条）**：用 `setsid … &` 把模拟器丢后台后再测，包用户下**必崩**；同一条命令前台跑 / 由 Node `spawn()` 拉起则**正常**。初版结论「包用户下 `-gpu host` 必崩」是这个测试形态造成的假象。**结论：验收必须走产品真实启动路径（服务 → spawn），手工命令行只能用于单点排查。**
 
+> **补充（0.2.4，见偏差 16.3）**：上面「有 X + render node 就能 host」还差一条**运行期**前提——emulator 子进程的 cwd 必须对包用户可读。cwd 继承成 `/root`（0700）时，同样的 X、同样的 render node、同样的 QEMU 参数，host 依然 2s 静默失败（只有一句 `QEMU main loop exits abnormally`），而 `-gpu off` 正常。所以上表第 3 行的成立条件里，还应加上「cwd 可读」（现在由 `_spawnCwd()` 强制指定，不再依赖继承）。
+
 **是否随包自带 X server**：结论是**不自带，只探测**。两个硬理由：① `Xkasmvnc` 是 KasmVNC 1.4.0 / **GPL-2.0**（强 copyleft），随 MIT 包分发需附源码或书面要约；② 它 `ldd` 依赖 `libxfont2`/`libpixman-1-0`/`libunwind8`/`libwebp7`/`libxshmfence1` 等独立 deb，干净 fnOS 未必齐备。改为由运维把二进制投放到 `$TRIM_PKGVAR/runtime/xserver/`（升级不丢），包体积零增量。默认 `gpu: 'auto'`：投放了就自动吃到 ~2.9s 收益，没投放就回落 `off`。详见「偏差 5 改造方案（已实施）」。
 
 **附带结论（不改进代码，仅记录）**：此版本 emulator **拒绝 `-accel off`**，需 `ANDROID_I_WANT_MY_TCG=yes` 才允许纯软件 CPU 模拟。因此本移植版**强依赖 `/dev/kvm` 可读写**（即包用户属于 `kvm` 组，且安装时 `all.editor` 权限授予到位）。无 KVM 时 `-accel off` 会立即失败，前端 `kvm.writable=false` 的红条警告依旧有效。
@@ -743,6 +745,128 @@ rc=1
 
 **版本处置**：`0.2.0` / `0.2.1` 不可用（wizard / 包结构），`0.2.2` 能装但端口可能撞，发 `0.2.3`。
 
+### 偏差 16 — 「起不来」的三个链式真因：AVD 遗留占用 / `$HOME` 不可写 / emulator 继承的 `cwd`（0.2.4 修复）
+
+用户装完 0.2.3 第一次点开模拟器就贴回一屏日志，里面两条 FATAL：
+
+```
+ERROR | Your GPU cannot be used for hardware rendering. Consider using software rendering.
+FATAL | Running multiple emulators with the same AVD is an experimental feature.
+        Please use -read-only flag to enable this feature.
+[exit] code=1 signal=null
+[boot-fail] 模拟器进程已退出（code=1）
+[gpu] -gpu host 启动失败（模拟器进程已退出（code=1）），自动降级 off 重试
+```
+
+一眼看是「GPU 不行」，实际是三件互不相干的事叠在一起。逐层拆：
+
+**16.1 同一 AVD 的遗留模拟器（用户报的这条 FATAL）**
+
+emulator 用 `<AVD>/<name>.avd/hardware-qemu.ini.lock` + `multiinstance.lock` 保证单实例，
+第二个实例直接 FATAL 退出。旧实现**没有任何回收**：只要是异常退出（崩溃 / 被 kill -9 /
+我此前手工测试留下的孤儿进程），锁就留在盘上，下一次启动必然撞死；更糟的是 `start()`
+还会把这条错误当成「host 不行」再降级 `-gpu off` 重试一次——重试同样撞锁，日志里出现
+两段启动输出，真因被埋掉。
+
+取证时踩到的一个坑值得记下来：`pgrep -f '-avd apkstart'` **会命中扫描者自己**（我们的
+日志行里就抄着完整命令行），也会命中 `-avd apkstart2`。改成读 `/proc/<pid>/cmdline`、
+要求 `qemu-system` 且 `-avd <name>` 整词匹配（`(?:^|\s)-avd\s+name(?:\s|$)`），不依赖
+procps、也不会自我命中。
+
+做法（`server/service/emulator.js`）：
+
+- `scanAvdEmulators(avdName)`：扫 `/proc`，跳过自身 pid，返回所有占着该 AVD 的 qemu；
+- `_releaseAvd(avdName)`：SIGTERM → 轮询等待（默认 6s）→ 仍在则 SIGKILL → 还在就抛
+  `CONFLICT`（文案点名 pid 与处置办法）→ 清掉 `*.lock`；
+- 顺序关键：`_releaseAvd` 必须在 `ensureAvd` **之前**（锁被占着时重写 `config.ini` 也白搭）；
+- `start()` 遇到 `CONFLICT` **不做** `-gpu off` 重试（AVD 冲突与 GPU 无关），并把失败写进
+  `state='error'`——早先漏了这一步，前端看到的是「一直在 starting」，转圈不停。
+
+真机复验（用真实包用户 uid 926 起，故意留一个 root 属主的孤儿 qemu）：
+
+```
+[avd] 无权结束 pid=3796763（EPERM）
+模拟器无法启动：另一个使用 AVD「apkstart」的模拟器还在运行（pid=3796763），
+  它属于其他用户，当前身份（apkstart-fnos）无权结束它…
+[gpu] AVD 冲突与 GPU 无关，不做 -gpu off 重试
+```
+
+给富有权限的进程时则正常回收、清锁、继续启动。
+
+**16.2 adb 的 `$HOME` 不可写（更隐蔽，卡了两轮）**
+
+16.1 修完后开机正常，但 `/api/status` 一直是 `adbConnected:false`，adb 侧原文：
+
+```
+F adb : adb_utils.cpp:315 Cannot mkdir '/home/apkstart-fnos/.android': No such file or directory
+Aborted
+```
+
+包用户没有家目录：`/home/apkstart-fnos` 不存在，父目录 `/home` 是 root 属主，uid 926 建不出来。
+`core/adb.js` 此前直接沿用 `process.env.HOME`（服务由平台拉起时为空或指向不存在目录）。
+修法：`pickWritableHome()` 依次试 `$HOME` → `$TRIM_PKGVAR` → `$TRIM_APPDATA` → `$TMPDIR/apkstart-adb-home`，
+**真的 mkdir + access(W_OK) 验一遍**再用；`_adbEnv()` 把 `HOME` 指过去。修后
+`adb devices` → `emulator-5554  device`，`adbConnected:true`。
+
+同一条命令手工跑仍会 Aborted（我 shell 里没设 HOME）——这恰好说明「编译时看着对、运行时
+env 不对」才是这 bug 的本质，靠单点手工验证抓不住。
+
+**16.3 `-gpu host` 静默失败 = emulator 继承了不可读的 `cwd`（GPU 加速真正跑通的最后一环）**
+
+16.1/16.2 之后 emulator 能起、adb 能连，但 `gpu` 始终是
+`{mode:'off', reason:'fallback-after-failure'}`，即用户长期关切的那句「GPU 加速没写对」。
+这次的日志比用户贴的那份更干净——host 尝试**只有一行**，前后没有任何错误：
+
+```
+[start] ... -gpu host -accel on -port 5554 ...
+[start] KVM available=true writable=true accel=on gpu=host display=:9
+INFO  | emuglConfig_init: vulkan_mode_selected:host gles_mode_selected:host
+DEBUG | Starting QEMU main loop
+WARNING | QEMU main loop exits abnormally with code 1     ← 2.1s 内，无其他错误行
+```
+
+排查过程（这段方法论比结论更值钱）：
+
+1. 把子进程 stdio 从 pipe 改成落盘文件、加 `-verbose`，确认 `QEMU main loop` 之前一切正常：
+   `vulkan_mode_selected:host`、`Graphics Adapter … (Mesa Intel(R) Graphics (ADL-N))`、
+   `hasSufficientHwGpu: Ok`——**显卡能力检查是通过的**，那条 `Your GPU cannot be used for
+   hardware rendering` 是 gfxstream 早期打印的固定噪声，不是结论。
+2. 对比同一次启动里 host/off 两次的 QEMU 参数（`Concatenated QEMU options`）：**完全一致**，
+   只有 modem 的随机端口不同。所以不是 `-gpu` 改了 QEMU 的 device 拓扑。
+3. 手工重放（Xvnc + emulator 前台跑）在 `cwd=/` 下 host **能开机**（`Boot completed 26684ms`）。
+   注意：手工重放前必须把 `<AVD>/config.ini` 的 `hw.gpu.mode` 改成 `host`，否则 emulator 会
+   按 AVD 里的 `off` 退回 lavapipe（`Your AVD has been configured with an in-guest renderer…Falling
+   back to 'lavapipe' mode`），跑出「host 其实能用」的假阳性。
+4. 逐步复刻产品侧的环境变量（`ANDROID_SDK_HOME` / `ANDROID_EMULATOR_USE_SYSTEM_LIBS=0` /
+   `ANDROID_ADB_SERVER_PORT=5044` / `XDG_RUNTIME_DIR=/run/user/0`）→ 仍然能开机。
+5. 唯一剩下的差异是 **cwd**：产品侧那次服务是 `su -c …` 从 `/root` 拉起的，cwd 继承成
+   `/root`（0700 root），包用户连 `.` 都读不了。把服务改成从 `/` 拉起，同一份代码 host
+   立刻跑通（`reason:'auto-host'`，boot 28735ms）。A/B 成立。
+
+修法（最小、可验证）：`spawn(emulator)` **显式传 cwd**，指向 `$APPDATA/tmp`（包用户自己的
+可写目录），不再继承服务进程的 cwd；建不出来时退回 `undefined`（不阻断启动），并把 cwd 打进
+`[start]` 日志——下次一条日志就能排除这一类。另外在降级分支加一句提示：若只有「QEMU main
+loop exits abnormally」且无其他错误，先看 `[start]` 的 cwd、再看 AVD 锁与 5554 端口。
+
+修后真机（**故意**从 `/root` 启动服务，即原本必失败的那套环境）：
+
+```
+[gpu] 自动检测到硬件 3D X display 与 render node，启用 -gpu host（DISPLAY=:9）
+[start] KVM available=true writable=true accel=on gpu=host display=:9 cwd=/vol2/@appdata/apkstart-fnos/tmp
+[boot] boot_completed in 27614ms
+status: emulator=running  gpu=host( auto-host )  adbConnected=true
+```
+
+至此「GPU 加速」不是配置项上的字样，而是真跑在 Intel ADL-N 的 Mesa/Vulkan 上
+（`vulkan_mode_selected:host gles_mode_selected:host` + `Graphics Adapter … Mesa Intel(R) Graphics (ADL-N)`）。
+
+顺带解释用户日志里那条 `Failed to create /home/apkstart-fnos for shader cache (Permission
+denied)---disabling.`：它是 **Xvnc 进程里 Mesa** 打的（不是 emulator），同样因为 `HOME` 指到
+不存在的家目录，Mesa 关掉了自己的磁盘 shader cache。`xserver` 的 spawn 已经给了
+`HOME: APPHOME`，这条只在「Xvnc 由运维/旧版本用别的 env 拉起」时出现，不影响模拟器渲染。
+
+**版本处置**：16.1 / 16.2 / 16.3 全在 `0.2.4`；三条都不需要改 fpk 结构，可直接覆盖安装。
+
 ### 附：已按真机实测校正的参数（非偏差，属对齐）
 
 - `buildArgs`：`-no-window -no-audio -no-boot-anim -gpu off -accel on -port <port> -no-snapshot-save`（`-gpu` 见偏差 5；`-accel off` 被此版本 emulator 拒绝，见偏差 5 附带结论）。
@@ -941,9 +1065,11 @@ app/ui/config: {".url":{"apkstart-fnos.main":{...,"type":"url","port":"8890","ur
 [gpu.js / -gpu 模式裁决] 9 条：off、auto+全齐→host、auto 无 X→off、auto 无 render node→off、
   显式 host 无 X 降级、显式 swiftshader 无 X 也降级、显式 host 齐全尊重、gpuAutoEnable=false、未知模式回落
 
-[fnos-unit] 结果：64 通过，0 失败
-npm test 全链：run-tests 39 + engine-test 24 + auto-test 3 + fnos-unit 64 = 130 通过，0 失败
+[fnos-unit] 结果：82 通过，0 失败
+npm test 全链：run-tests 39 + engine-test 24 + auto-test 3 + fnos-unit 82 = 148 通过，0 失败
 ```
+
+0.2.3 / 0.2.4 新增的 18 条用例（端口同源与探测、xattr PAX 兜底、AVD 回收、adb HOME、emulator cwd）都在这一组里。
 
 ---
 
@@ -975,6 +1101,6 @@ npm test 全链：run-tests 39 + engine-test 24 + auto-test 3 + fnos-unit 64 = 1
 - 启动误报（偏差 11）：`waitForPackage` 默认窗口 4s → **12s**（软件渲染下 splash→main 要 4~10s），`installer.js` 两处调用显式传值。真机验收：start 耗时 14793ms，`foregroundNow` 直接是应用包名。
 - ANR / 崩溃弹窗（偏差 12）：`current()` 改为**先窗口焦点、后 Activity 栈**，新增 `parseSystemDialog()` 识别 `Application Not Responding:` / `Application Error:` 弹窗窗口（`system` 归一成 `android`），弹窗优先级高于 resumed。真机验收：`mCurrentFocus=Window{33d43fa u0 Application Error: com.google.android.bluetooth}` 时返回 `{"foregroundPackage":"com.google.android.bluetooth","activity":"","source":"dialog","systemSurface":true}`，没有再把桌面谎报成前台。
 - fnpack：补 `maintainer_url` / `distributor_url`，删掉空 `preview_urls`；`platform` / `packages` 保持单元素 `x86`（无 arm 产物，不跟随参考源加 arm），见偏差 10。
-- 单测：`npm test` 全链 **105 通过 0 失败**（run-tests 39 + engine-test 24 + auto-test 3 + `test/fnos-unit.js` 39）。前台解析与弹窗识别的夹具**全部逐字取自真机 dump**，并有「采样命令必须含 topResumedActivity」「第一次采样必须是 window 焦点」的命令级断言，Android 14 null 回归与 ANR 谎报都可在不连真机时被拦住（见偏差 9b / 11）。
+- 单测：`npm test` 全链 **148 通过 0 失败**（run-tests 39 + engine-test 24 + auto-test 3 + `test/fnos-unit.js` 82）。前台解析与弹窗识别的夹具**全部逐字取自真机 dump**，并有「采样命令必须含 topResumedActivity」「第一次采样必须是 window 焦点」的命令级断言，Android 14 null 回归与 ANR 谎报都可在不连真机时被拦住（见偏差 9b / 11）。0.2.3/0.2.4 补的端口与 AVD/HOME/cwd 用例走「真起监听进程 / 真杀进程 / 真 mkdir」而不是只断言源码，`netstat -ltn` 那条假修复就是被这类用例当场抓出来的。
 
 **IS_PASS: YES**

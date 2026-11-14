@@ -14,6 +14,8 @@ const {
   buildHardeningPlan,
   parseDisabledPackages,
   HARDENING_BLUETOOTH_PKG,
+  EmulatorManager,
+  scanAvdEmulators,
 } = require('../server/service/emulator');
 const {
   parseResumedActivity,
@@ -1034,3 +1036,145 @@ test('cmd/main 在拉起 node 之前探测端口占用，并说明占用者与�
   console.log(`\n[fnos-unit] 结果：${passed} 通过，${failed} 失败\n`);
   process.exit(failed ? 1 : 0);
 })();
+
+// --- 同一 AVD 的遗留模拟器（IMPL 偏差 16）---
+
+test('scanAvdEmulators 只认 qemu-system，且 -avd 必须整词匹配', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const os = require('os');
+
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'proc-'));
+  const mk = (pid, cmd) => {
+    const d = path.join(root, String(pid));
+    fs.mkdirSync(d);
+    fs.writeFileSync(path.join(d, 'cmdline'), `${cmd.split(' ').join('\0')}\0`);
+  };
+  mk(1001, '/x/qemu-system-x86_64-headless -avd apkstart -no-window');
+  mk(1002, '/x/qemu-system-x86_64-headless -avd apkstart2 -no-window'); // 名字前缀相似，不能命中
+  mk(1003, '/usr/bin/node /app/server/index.js -avd apkstart');         // 不是 qemu，不能命中
+  mk(1004, '/x/qemu-system-x86_64 -avd apkstart');                      // 自己，跳过
+
+  const hits = scanAvdEmulators('apkstart', { procRoot: root, selfPid: 1004 });
+  assertEqual(hits.map((h) => h.pid).join(','), '1001', '只应命中真正占着该 AVD 的 qemu');
+});
+
+test('_releaseAvd 回收同 AVD 的遗留模拟器，并清掉陈旧锁文件', async () => {
+  // 现场（10.31.0.4）：上一个实例的 qemu 还活着并持有 AVD，第二个 emulator 直接
+  // FATAL「Running multiple emulators with the same AVD」。这里用真进程 + 伪造 /proc
+  // 验证「先回收、再清锁」，而不是只断言源码里有几行。
+  const fs = require('fs');
+  const path = require('path');
+  const os = require('os');
+  const { spawn } = require('child_process');
+
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'avd-'));
+  const procRoot = path.join(tmp, 'proc');
+  fs.mkdirSync(procRoot);
+  const avdRoot = path.join(tmp, 'avd');
+  const avdDir = path.join(avdRoot, 'apkstart.avd');
+  fs.mkdirSync(avdDir, { recursive: true });
+  fs.writeFileSync(path.join(avdDir, 'hardware-qemu.ini.lock'), '1234');
+  fs.writeFileSync(path.join(avdDir, 'multiinstance.lock'), '');
+
+  const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+  const pd = path.join(procRoot, String(child.pid));
+  fs.mkdirSync(pd);
+  fs.writeFileSync(path.join(pd, 'cmdline'), 'qemu-system-x86_64-headless\0-avd\0apkstart\0');
+  let dead = false;
+  child.on('exit', () => {
+    dead = true;
+    try { fs.rmSync(pd, { recursive: true, force: true }); } catch (_) { /* ignore */ }
+  });
+
+  const mgr = new EmulatorManager({
+    paths: { AVD: avdRoot, APPHOME: tmp, APPDATA: tmp },
+    provision: {},
+    settingsGetter: () => ({ emulator: {} }),
+    xserver: {},
+  });
+  await mgr._releaseAvd('apkstart', { procRoot, termWaitMs: 5000 });
+
+  assert(dead, '遗留模拟器进程应已被结束');
+  assert(!fs.existsSync(path.join(avdDir, 'hardware-qemu.ini.lock')), 'hardware-qemu.ini.lock 应被清理');
+  assert(!fs.existsSync(path.join(avdDir, 'multiinstance.lock')), 'multiinstance.lock 应被清理');
+});
+
+test('AVD 回收发生在 ensureAvd 之前；CONFLICT 不做无意义的 -gpu off 重试；HOME 指向可写目录', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server', 'service', 'emulator.js'), 'utf8');
+
+  const relIdx = src.indexOf('await this._releaseAvd(avdName)');
+  const ensureIdx = src.indexOf('this.ensureAvd({ wipe, gpuMode })', relIdx);
+  assert(relIdx > 0, '_startOnce 应调用 _releaseAvd');
+  assert(ensureIdx > relIdx, '_releaseAvd 必须在 ensureAvd 之前（锁被占着时 ensureAvd 也白搭）');
+
+  assert(/if \(e\.code === 'CONFLICT'\)/.test(src), 'start() 遇到 AVD 冲突应直接抛出，不降级重试');
+  assert(/HOME: home/.test(src), '_spawnEnv 应把 HOME 指到可写目录（否则 shader cache 建不出来）');
+});
+
+test('adb 的 HOME 必须可写：包用户没有家目录时不能照抄 process.env.HOME', () => {
+  // 真机：adb 一启动就 `mkdir /home/apkstart-fnos/.android` → No such file or directory → Aborted。
+  // 表现是「模拟器开机成功但 adb devices 一直获取失败」，很容易误判成模拟器问题。
+  const fs = require('fs');
+  const path = require('path');
+  const os = require('os');
+  const { pickWritableHome, AdbClient } = require('../core/adb');
+
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'adbhome-'));
+  const saved = { HOME: process.env.HOME, TRIM_PKGVAR: process.env.TRIM_PKGVAR };
+  try {
+    // 父目录不可写的 HOME：mkdir 一定失败（/ 下普通用户建不了目录）
+    process.env.HOME = `/nonexistent-root-${Date.now()}/home`;
+    process.env.TRIM_PKGVAR = path.join(tmp, 'var');
+    assertEqual(pickWritableHome(), path.join(tmp, 'var'), 'HOME 不可用时应回落到 TRIM_PKGVAR');
+    assert(fs.existsSync(path.join(tmp, 'var', '.android')), '.android 目录应被创建');
+
+    const env = new AdbClient({ adbPath: 'adb', serial: '' })._adbEnv();
+    assertEqual(env.HOME, path.join(tmp, 'var'), '_adbEnv 的 HOME 应指向可写目录');
+    assertEqual(env.ANDROID_ADB_SERVER_PORT, '5044', 'adb server 端口应保持 5044');
+
+    // HOME 本身可写时应优先沿用（保住已有 adbkey）
+    const okHome = path.join(tmp, 'realhome');
+    fs.mkdirSync(okHome, { recursive: true });
+    process.env.HOME = okHome;
+    assertEqual(pickWritableHome(), okHome, '可写 HOME 应被优先使用');
+  } finally {
+    if (saved.HOME === undefined) delete process.env.HOME; else process.env.HOME = saved.HOME;
+    if (saved.TRIM_PKGVAR === undefined) delete process.env.TRIM_PKGVAR; else process.env.TRIM_PKGVAR = saved.TRIM_PKGVAR;
+  }
+});
+
+test('emulator 子进程必须显式给 cwd，不能继承服务进程的 cwd', () => {
+  // 真机（10.31.0.4）：服务从 /root（0700）被 su 拉起 → cwd 继承 /root → 包用户读不了
+  // → QEMU 2s 内静默退出（只有 `QEMU main loop exits abnormally with code 1`，无错误行）
+  // → host 必降级 off。同一台机 cwd=/ 时 host 正常（vulkan_mode_selected:host）。
+  const fs = require('fs');
+  const path = require('path');
+  const os = require('os');
+
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'cwd-'));
+  const temp = path.join(tmp, 'tmp');
+  const mgr = new EmulatorManager({
+    paths: { APPTEMP: temp, APPDATA: tmp },
+    provision: {},
+    settingsGetter: () => ({ emulator: {} }),
+    xserver: {},
+  });
+  assertEqual(mgr._spawnCwd(), temp, '_spawnCwd 应返回 APPTEMP');
+  assert(fs.existsSync(temp), 'APPTEMP 应被创建（不存在时 spawn 会直接失败）');
+
+  // 建不出来的路径要退回 undefined（= 继承 cwd），不能抛错阻断启动
+  const bad = new EmulatorManager({
+    paths: { APPTEMP: '/proc/nonexistent-apkstart/tmp', APPDATA: tmp },
+    provision: {},
+    settingsGetter: () => ({ emulator: {} }),
+    xserver: {},
+  });
+  assertEqual(bad._spawnCwd(), undefined, '不可创建的 cwd 应退回 undefined');
+
+  // 静态兜底：spawn 必须带上 cwd（否则上面的方法形同虚设）
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server', 'service', 'emulator.js'), 'utf8');
+  assert(/\{ env, cwd, stdio:/.test(src), 'spawn(emulator) 必须传 cwd');
+});
