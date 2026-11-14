@@ -116,7 +116,7 @@ Web 端支持选择或拖拽上传 `.apk`（单文件 ≤ 500 MB），服务端�
 **P0-12 fnDepot 索引生成**
 在源仓库根目录生成符合 V2 的 `fnpack.json`（字段契约按目标机实测 schema）：
 - `schema_version` = `"2"`；`source_info{name,author,homepage,description}`；
-- `apps.apkstart-fnos` 含 `display_name` / `desc` / `platform: ["x86"]` / `categories: ["系统工具"]` / `icon_url` / `readme_url` / `maintainer` / `maintainer_url` / `distributor` / `distributor_url` / `run_as: "package"` / `install_type: ""`（空字符串） / `is_docker: false` / `service_port: "8890"`（**字符串**）；
+- `apps.apkstart-fnos` 含 `display_name` / `desc` / `platform: ["x86"]` / `categories: ["系统工具"]` / `icon_url` / `readme_url` / `maintainer` / `maintainer_url` / `distributor` / `distributor_url` / `run_as: "package"` / `install_type: ""`（空字符串） / `is_docker: false` / `service_port: "18990"`（**字符串**）；
 - `releases.<version>` 含 `changelog` / `updated_at` / `packages.x86{download_url, sha256, size}`（packages 的 key 同为平台词表 `x86`）；
 - **不含** `preview_urls` 键（真实源中不存在，不要写成空数组）；
 - `download_url` 指向 **GitHub Release 资产**：`https://github.com/TaroCats/apkstart/releases/download/v<version>/apkstart-fnos_<version>_x86.fpk` —— 安装包放 Release，不进仓库。
@@ -155,10 +155,10 @@ Web 端支持选择或拖拽上传 `.apk`（单文件 ≤ 500 MB），服务端�
 
 ### 4.1 端口
 
-- **Web 控制台默认端口 `8890`**（避开应用中心 5666/5667、8080/8443 等常用端口）。
+- **Web 控制台默认端口 `18990`**（0.2.3 前是 8890，实测在目标机被 Docker 里的 uvicorn 长期占用；18990 避开应用中心 5666/5667、8080/8443 与同机已占的 8890/8899/18080）。
 - 声明位置：`manifest` 侧（供 fnDepot `service_port`）+ `app/ui/config` 的 `port` 字段 + 服务自身默认值。三者必须同源生成（由打包脚本注入），不允许三处手写不一致。
-- `ui/config` 入口示例语义：`{".url": {"apkstart-fnos.main": {title:"ApkStart", icon:"images/icon_64.png", type:"url", protocol:"http", port:"8890", url:"/", allUsers:true}}}`。
-- 服务监听 `0.0.0.0:8890`（需局域网访问），但 **adb server 与 emulator console 端口不得对外**：adb server 仅本机，emulator 走 `127.0.0.1` 端口段（5554+）。
+- `ui/config` 入口示例语义：`{".url": {"apkstart-fnos.main": {title:"ApkStart", icon:"images/icon_64.png", type:"url", protocol:"http", port:"18990", url:"/", allUsers:true}}}`。
+- 服务监听 `0.0.0.0:18990`（需局域网访问），但 **adb server 与 emulator console 端口不得对外**：adb server 仅本机，emulator 走 `127.0.0.1` 端口段（5554+）。
 - 端口冲突处理见 P1-7（P2 前允许启动失败并给中文提示）。
 
 ### 4.2 TRIM_* 环境变量使用
@@ -173,7 +173,7 @@ Web 端支持选择或拖拽上传 `.apk`（单文件 ≤ 500 MB），服务端�
 | `TRIM_PKGTMP` | 可丢弃：下载缓存与上传暂存 | `downloads/`、`uploads/` |
 | `TRIM_PKGHOME` | 进程 HOME；作为 `ANDROID_AVD_HOME` / `ANDROID_SDK_HOME` 基址 | `avd/` |
 | `TRIM_PKGMETA` / `TRIM_APPNAME` | 元信息 / 应用名 | — |
-| `TRIM_SERVICE_PORT` | 服务端口（由平台下发时可覆盖默认 8890） | — |
+| `TRIM_SERVICE_PORT` | 服务端口。优先级：本变量 → `ui/config` 的 `port` → 默认 18990（见 IMPL 偏差 15） | — |
 
 约束：`runtime/` 只读共享、`avd/` 按实例分目录、`$TRIM_PKGTMP` 允许被系统清空（**不得**放任何必需状态）。
 

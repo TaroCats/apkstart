@@ -2,7 +2,7 @@
 /**
  * 进程入口（ARCH §2.2 / §6.1）：
  * 加载 config → 构造单例（Store/Provision/Emulator/Engine/Installer）→ 装配路由
- * → 启动 HTTP（0.0.0.0:8890，或 LISTEN_SOCKET）→ 注册 SIGTERM/SIGINT 优雅退出。
+ * → 启动 HTTP（0.0.0.0:18990，或 LISTEN_SOCKET）→ 注册 SIGTERM/SIGINT 优雅退出。
  */
 const path = require('path');
 const fs = require('fs');

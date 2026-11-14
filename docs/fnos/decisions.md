@@ -15,4 +15,4 @@
 - 系统已装 `libx11-6 / libpulse0 / libgbm1 / libxcb1 / libxext6 / libxcomposite1 / libnss3 / libasound2`，Linux 版 emulator 无头运行依赖齐备。
 - Node v22.23.4 已在目标机 `/usr/local/bin/node`（但 fpk 不应依赖系统 Node，须自带或使用 fnOS 的 nodejs 应用；架构需给出明确方案）。
 - 应用中心安装无自动化凭据 → 真机验证走「按 fpk 契约手动安装 + 启停 + 功能验证」。
-- 默认端口 **8890**。
+- 默认端口 **18990**（0.2.3 起；原 8890，实测在目标机被 Docker 里的 uvicorn 长期占用，见 IMPL 偏差 15）。

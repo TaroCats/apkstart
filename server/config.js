@@ -12,7 +12,7 @@ const { PATHS, buildPaths, ensureDirs } = require('./service/paths');
 const VERSION = process.env.APKSTART_VERSION || '0.1.0';
 
 /** Web 控制台默认端口（PRD §4.1）。 */
-const DEFAULT_PORT = 8890;
+const DEFAULT_PORT = 18990;
 
 /** 服务监听地址：默认 0.0.0.0（局域网可访问）；P1 可切 unix socket。 */
 const DEFAULT_HOST = '0.0.0.0';

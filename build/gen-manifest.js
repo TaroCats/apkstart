@@ -80,7 +80,7 @@ function main() {
   const templateFile = args.template;
   const outFile = args.out || (stageDir && path.join(stageDir, 'manifest'));
   const version = args.version || '0.1.0';
-  const port = args.port || '8890';
+  const port = args.port || '18990';
   const changelog = String(args.changelog || '初始 fnOS 移植版本').replace(/\s*\n\s*/g, ' ').trim();
 
   if (!stageDir || !fs.existsSync(stageDir)) throw new Error(`stage 目录不存在: ${stageDir}`);

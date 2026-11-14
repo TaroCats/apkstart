@@ -11,7 +11,8 @@
 
 **不可动摇的边界（来自 decisions.md，不得推翻）**
 - 技术栈：**Node.js 22 + 原生 HTML/CSS/JS，零第三方运行时依赖**。
-- 后端单进程，端口 **8890**，监听 `0.0.0.0`；adb server 与 emulator console **只绑 `127.0.0.1`**。
+- 后端单进程，端口 **18990**，监听 `0.0.0.0`；adb server 与 emulator console **只绑 `127.0.0.1`**。
+  （0.2.3 前默认 8890，实测在目标机被 Docker 里的 uvicorn 长期占用，见 IMPL 偏差 15）
 - 解析层 `core/{zip,axml,arsc,apk,png}.js` **原样复制，不改逻辑**。
 - 单实例共享一台模拟器跑多应用（Q3）；在线包，不含运行时二进制（Q2）；P0 不做鉴权（Q1）；`config/privilege` 声明 `join-groups:["all.editor","render","video"]` 即获得 `/dev/kvm`（属组 `all.editor`）与 `/dev/dri/renderD128`（属组 `render`）读写权，运行时仍检测可写性（Q4）；图形渲染默认 `gpu: 'auto'`——**权限早已不是瓶颈**，唯一门槛是宿主有没有「带硬件 3D 的 X display」（只有 `Xkasmvnc` 支持 `-hw3d`）；因 GPL-2.0 与其 deb 依赖，二进制**不随包携带**，由运维投放到 `$TRIM_PKGVAR/runtime/xserver/`，投放了就自动上 `-gpu host`（实测 −2.86s / −12.0%），没投放就安静回落 `off`，详见 IMPL 偏差 5 改造方案（Q4）；`maintainer` 保留 `RoutineMiku`、`distributor: TaroCats`（Q5）。
 
@@ -45,7 +46,7 @@
 ```mermaid
 flowchart LR
   Browser["浏览器 Web 控制台<br/>ui/index.html + app.js"]
-  subgraph Node["Node.js 单进程 (0.0.0.0:8890)"]
+  subgraph Node["Node.js 单进程 (0.0.0.0:18990)"]
     HTTP["http/server.js<br/>静态+JSON+错误封装"]
     Router["http/router.js<br/>路由表"]
     API["api/* 处理器"]
@@ -78,7 +79,7 @@ flowchart LR
 | `/dev/dri/renderD128` | `crw-rw---- root render 226,128`，`render` 组内仅 `marvis-app`；出厂态包用户不可得 | 设备本身**不是**瓶颈：加入 `render` 组后包用户可正常 open（qemu 实测持有 6 个 fd）。但仅此不够——还需 `video`（`card0`）与一个**带 `-hw3d` 的 X display**，后者宿主不自带 → 默认 `-gpu off`。详见 IMPL 偏差 5 更正 |
 | 系统共享库 | `libx11-6 / libpulse0 / libgbm1 / libxcb1 / libxext6 / libxcomposite1 / libnss3 / libasound2` 均已安装 | emulator 无头运行依赖齐备，无需额外装包 |
 | Node 运行时 | 系统 `/usr/local/bin/node` v22 存在，但 fpk 不硬依赖 | 见 §5.0 `resolve_node()` 探测链 |
-| 说明端口 | adb server 仅 `127.0.0.1`；emulator console `127.0.0.1:5554+` | 均不对外暴露，仅 Web 控制台 `0.0.0.0:8890` 对内网开放 |
+| 说明端口 | adb server 仅 `127.0.0.1`；emulator console `127.0.0.1:5554+` | 均不对外暴露，仅 Web 控制台 `0.0.0.0:18990` 对内网开放 |
 
 **一句话**：`all.editor` 决定能否 KVM 加速，这是权限模型下的确定结论；图形渲染则**不是**——GPU 可跑通，卡点在「宿主缺一个带硬件 3D 的 X display」，且收益只有 ~3s（IMPL 偏差 5 更正）。
 
@@ -158,7 +159,7 @@ flowchart LR
 | `fnos/cmd/config_init` | N | 配置变更前：停服务（占位） | 20 |
 | `fnos/cmd/config_callback` | N | 配置变更后：重启服务以使 settings 生效 | 20 |
 | `fnos/config/privilege` | N | JSON：`{"defaults":{"run-as":"package"},"username":"apkstart-fnos","groupname":"apkstart-fnos","join-groups":["all.editor","render","video"]}` | 12 |
-| `fnos/config/resource` | N | JSON：`{"port":8890,"memory_mb":4096,"description":"KVM 无头 Android 运行时"}`（4096 为声明上限，非进程 `-memory`） | 15 |
+| `fnos/config/resource` | N | JSON：`{"port":18990,"memory_mb":4096,"description":"KVM 无头 Android 运行时"}`（`port` 由 pack.sh 按 `$PORT` 注入，与 `ui/config` 同源）（4096 为声明上限，非进程 `-memory`） | 15 |
 | `fnos/wizard/install` | N | 安装向导：**顶层数组** `[]trimpkg.WizardPage`，两个 `tips`（在线包说明 / GPU 可选） | 20 |
 | `fnos/wizard/uninstall` | N | 卸载向导：顶层数组，`tips` 说明数据保留策略（无 `switch`，`field` 值不进脚本，见 IMPL 偏差 13） | 20 |
 
@@ -207,7 +208,7 @@ flowchart LR
 
 ```jsonc
 {
-  "port": 8890,
+  "port": 18990,
   "screen": { "fps": 2, "maxWidth": 720 },   // fps 默认 2（P0-7）; maxWidth=0 表原图
   "emulator": {
     "name": "apkstart",        // AVD 名
@@ -538,10 +539,10 @@ function isArmOnly(abis) {
 2. 清 `build/stage/<appname>/`，`mkdir` fpk 骨架。
 3. 拷 `fnos/manifest.in`、`ICON*.PNG`、`config/`、`cmd/`、`wizard/`。
 4. 拷 `server/` `ui/` `core/` → `stage/.app/{server,ui,core}`（`app.tgz` 的内容根，独立于 fpk 根）。
-5. 生成 `.app/ui/config`（内嵌 `port:8890`、`type:url`、`url:/`），并把版本号注入 `.app/server/config.js`。
+5. 生成 `.app/ui/config`（内嵌 `port:$PORT`、`type:url`、`url:/`）与 `config/resource` 的 `port`（两者同源），并把版本号注入 `.app/server/config.js`。
 6. `node build/gen-manifest.js`：注入 `version`、`port`、先算 body checksum（见 7.2）。
 7. 生成图标：`node core/png.js drawAppIcon` 输出 `ui/images/icon_{64,256}.png`。
-8. `tar -czf stage/<appname>/app.tgz -C stage/.app server core ui`（**根级 app.tgz，不是 app/ 目录**；显式列成员以免多出 `./` 或外层目录名），再 `tar -czf <appname>_<version>_x86.fpk -C stage <appname>`（`--owner=0 --group=0 --mtime` 固定时间戳以可复现，非 GNU tar 加 `--no-mac-metadata`）。
+8. `tar -czf stage/<appname>/app.tgz -C stage/.app server core ui`（**根级 app.tgz，不是 app/ 目录**；显式列成员以免多出 `./` 或外层目录名），再 `tar -czf <appname>_<version>_x86.fpk -C stage <appname>`（`--owner=0 --group=0 --mtime` 固定时间戳以可复现；macOS 的 bsdtar 加 `--no-xattrs`——**只写 `--no-mac-metadata` 不管用**，实测仍会写出 `LIBARCHIVE.xattr.*` PAX 头，真机解包逐文件报「忽略未知的扩展头关键字」）。
 8.5. `node build/validate-package.js <fpk>`：校验产物结构，不通过就不许发版。
 9. `sha256sum` 输出 `dist/<appname>_<version>_x86.fpk.sha256`。
 10. `node build/gen-fnpack.js` 产出 `dist/fnpack.snippet.json`。
@@ -580,7 +581,7 @@ depend=nodejs
 ### 7.4 `app.tgz` 内的 `ui/config`
 
 ```json
-{".url":{"apkstart-fnos.main":{"title":"ApkStart","icon":"images/icon_64.png","type":"url","protocol":"http","port":"8890","url":"/","allUsers":true}}}
+{".url":{"apkstart-fnos.main":{"title":"ApkStart","icon":"images/icon_64.png","type":"url","protocol":"http","port":"18990","url":"/","allUsers":true}}}
 ```
 
 ### 7.5 `config/privilege` / `config/resource`
@@ -591,7 +592,7 @@ depend=nodejs
 ```
 ```json
 // resource
-{"port":8890,"memory_mb":4096,"description":"KVM 无头 Android 运行时"}
+{"port":18990,"memory_mb":4096,"description":"KVM 无头 Android 运行时"}
 ```
 > 注意：`config/resource` 的 `memory_mb` 是**声明的资源占用上限 4096 MB**，与 emulator 进程实际启动参数 `-memory 2048`（见 settings `emulator.memoryMB`）是**两个不同的数**，不要合并成一个。
 
@@ -633,7 +634,7 @@ depend=nodejs
       "run_as": "package",
       "install_type": "",
       "is_docker": false,
-      "service_port": "8890",
+      "service_port": "18990",
       "releases": {
         "0.1.0": {
           "changelog": "初始 fnOS 移植版本",
@@ -652,7 +653,7 @@ depend=nodejs
 }
 ```
 
-> 与旧稿关键差异（均据真实源实测，见 IMPL 偏差表）：`platform` 与 `packages` 的 key 均为 `x86`（非 `x86_64`）；`service_port` 为**字符串** `"8890"`；`install_type` 为**空字符串** `""`；新增 `bug_report_url`/`maintainer_url`/`distributor_url`；**无 `preview_urls` 键**（不是空数组，是整个键不存在，有截图才写）。
+> 与旧稿关键差异（均据真实源实测，见 IMPL 偏差表）：`platform` 与 `packages` 的 key 均为 `x86`（非 `x86_64`）；`service_port` 为**字符串** `"18990"`；`install_type` 为**空字符串** `""`；新增 `bug_report_url`/`maintainer_url`/`distributor_url`；**无 `preview_urls` 键**（不是空数组，是整个键不存在，有截图才写）。
 >
 > **发布形态（目标机 `fndepot.db` 的 `sources` 表实测）**：三个真实外部源 `TaroCats/FN-AppHub`、`TaroCats/huitai`、`jia070310/lemon-muisc` 的 `schema_version` 均为 `2`。**仓库名不必叫 `FnDepot`——任意普通仓库根目录放一个 `fnpack.json` 即可被添加为源；安装包不放在仓库目录里，而是上传为 GitHub Release 资产，`download_url` 指向该 Release 资产链接。** 因此无需「应用目录 + 目录内放 fpk」这种形态。
 >
@@ -667,7 +668,7 @@ depend=nodejs
 | ID | 任务 | 文件 | 依赖 | 验收点 |
 |---|---|---|---|---|
 | **T01** | 项目骨架 + 配置/路径 + 复用层落地 | `server/config.js`、`server/service/paths.js`、`core/{zip,axml,arsc,apk,png}.js`（复制）、`core/adb.js`（复制小改）、`core/inputguard.js` | — | `node -e "require('./core/apk').parseApk(某apk)"` 输出正确 package；`resolveAdb` 返回 Linux 路径；`PATHS` 在 `TRIM_PKGVAR` 存在时正确拼出 runtime/avd |
-| **T02** | HTTP 服务 + 路由 + 错误封装 + health/status/settings | `server/index.js`、`server/http/server.js`、`server/http/router.js`、`server/api/health.js`、`server/api/settings.js`、`server/service/store.js` | T01 | `curl 127.0.0.1:8890/api/health` → 200；`/api/status` 返回 StatusVO；错误返回 `{code,message}` 中文 |
+| **T02** | HTTP 服务 + 路由 + 错误封装 + health/status/settings | `server/index.js`、`server/http/server.js`、`server/http/router.js`、`server/api/health.js`、`server/api/settings.js`、`server/service/store.js` | T01 | `curl 127.0.0.1:18990/api/health` → 200；`/api/status` 返回 StatusVO；错误返回 `{code,message}` 中文 |
 | **T03** | KVM 检测 + 运行时部署（下载/续传/SHA/解压） | `server/service/kvm.js`、`server/service/provision.js`、`server/api/runtime.js` | T02 | `POST /api/runtime/deploy` 后轮询 progress 0→100；中断重试从已下载字节续；`runtime/platform-tools/adb version` 正常；KVM 不可写时 status 报 `kvm.writable=false` |
 | **T04** | 模拟器 AVD + 启停 + boot 等待 + 日志 | `server/service/emulator.js`、`server/api/emulator.js` | T03 | `POST /api/emulator/start` 后 ≤180s `/api/status` = running；`stop` ≤30s 变 stopped；重复 start 幂等（CONFLICT）；`/api/emulator/logs` 有输出 |
 | **T05** | Engine 聚合 + adb 健康检查 + screencap 健康 | `server/service/engine.js`、`server/api/screen.js`(frame/size 部分) | T04 | `GET /api/screen/frame` 返回有效 PNG；手动 kill emulator 后 ≤30s status=error/stopped 且中文原因 |
@@ -821,4 +822,4 @@ classDiagram
 1. **数据根改用 `TRIM_PKGVAR`**：上文 `$TRIM_APPDATA` 一律替换为 `TRIM_PKGVAR`（机上脚本实际只用 `TRIM_PKGVAR` / `TRIM_APPDEST` / `TRIM_PKGTMP` / `TRIM_TEMP_LOGFILE` / `TRIM_SYS_ARCH`）。本地开发回退 `$HOME/.apkstart`。保留 `TRIM_APPDATA` 作为次选回退，不报错。
 2. **`cmd/main start` 必须等到 `/api/health` 真的返回 200 才 `exit 0`**（fndepot 范式：最多等 20 s 轮询健康检查，失败则 kill 并清理 PID 返回 1）。否则应用中心会显示启动成功但页面打不开。
 3. **`start` 幂等**：PID 存活且健康 → 直接 `exit 0`；PID 存活但健康检查失败 → 清理后重启。
-4. **端口入口用 `type: "url"` + `port: "8890"`**（P0 不做统一网关 socket，避免 gatewayPrefix 配错导致入口 502）；但 `server/http/server.js` 需预留 `LISTEN_SOCKET` 环境变量分支，便于 P1 切网关。
+4. **端口入口用 `type: "url"` + `port: "18990"`**（P0 不做统一网关 socket，避免 gatewayPrefix 配错导致入口 502）；但 `server/http/server.js` 需预留 `LISTEN_SOCKET` 环境变量分支，便于 P1 切网关。

@@ -89,13 +89,13 @@ fnos/
 │   └── config_init  config_callback
 ├── config/
 │   ├── privilege        # {"defaults":{"run-as":"package"},"join-groups":["all.editor","render","video"]}
-│   └── resource         # port 8890 / memory_mb 4096
+│   └── resource         # port 18990（由 pack.sh 按 $PORT 注入）/ memory_mb 4096
 └── wizard/{install,uninstall}
 ```
 
 **manifest（真实词表，非猜测）**
 - `platform=x86`（fnOS **不存在 `x86_64` 这个取值**）
-- `checkport=false`（端口自检会误判 8890 已占用）、`disable_authorization_path=true`
+- `checkport=false`（平台的端口自检对「端口被别的服务占着」只能报错停下，帮不上忙；改成我们自己在 `cmd/main start` 里探测并说明占用者，见 IMPL 偏差 15）、`disable_authorization_path=true`
 - 不写 `depend`（Node 与 adb 随包自带，不依赖系统包）
 - `checksum` 由 `build/gen-manifest.js` 计算：递归收集除 `manifest` 外全部文件 → 按相对路径排序 → 逐行 `<sha256>  ./rel` → 整体再 sha256
 
@@ -185,7 +185,7 @@ App Center 的完整流程（下载 → 解 app.tgz → 落 `$TRIM_APPDEST` → 
 **fnDepot V2 关键坑（实测得到）**
 - 仓库根放 `fnpack.json` 即可被添加为源，仓库名不必叫 FnDepot；
 - `platform` 与 `packages` 的 key 都是 `x86`（不是 `x86_64`）；
-- `service_port` 是**字符串** `"8890"`；
+- `service_port` 是**字符串** `"18990"`；
 - `install_type` 是**空串**；
 - **不存在 `preview_urls` 键**（不是空数组）—— 写了会被 schema 拒。
 

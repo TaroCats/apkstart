@@ -838,6 +838,16 @@ test('pack.sh 走 app.tgz 而不是 app/ 目录，且构建后就地校验包结
   assert(/validate-package\.js/.test(src), 'pack.sh 必须调用包结构校验（否则坏包照样能发出去）');
 });
 
+test('macOS 打包关掉 xattr：只写 --no-mac-metadata 不够（实测仍出 PAX 头）', () => {
+  // bsdtar 3.5.3 实测：--no-mac-metadata 之后包里照样有 LIBARCHIVE.xattr 头，
+  // 必须 --no-xattrs。0.2.2 只加了前者，真机解包逐文件报「忽略未知的扩展头关键字」。
+  const fs = require('fs');
+  const path = require('path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'build', 'pack.sh'), 'utf8');
+  assert(/--no-xattrs/.test(src), 'pack.sh 的 REPRO_FLAGS 必须含 --no-xattrs');
+  assert(/LIBARCHIVE\\?\.xattr/.test(src), 'pack.sh 应保留 PAX 头兜底检查');
+});
+
 test('cmd 脚本按 $APPDEST 取路径时，只取 adb 之外的代码根语义', () => {
   // 这两处是 0.2.1 同期修掉的路径假设：
   //   ① main 里 adb 在数据根 runtime/ 下，不在代码根
@@ -858,6 +868,154 @@ test('cmd 脚本按 $APPDEST 取路径时，只取 adb 之外的代码根语义'
   const init = code('install_init');
   assert(!/\$APPDEST\/\.\.\/cmd/.test(init), 'install_init 不该用 $APPDEST/../cmd（父目录里没有 cmd/）');
   assert(/dirname "\$0"/.test(init), 'install_init 应用 $0 反推 cmd 目录');
+});
+
+// --- 端口：默认值必须同源，且不能被 8890 钉死（IMPL 偏差 15）---
+
+test('默认端口五处同源，且不再写死 8890（目标机被 uvicorn 占用）', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const read = (p) => fs.readFileSync(path.join(__dirname, '..', p), 'utf8');
+
+  const pack = read('build/pack.sh');
+  const m = pack.match(/PORT="\$\{PORT:-(\d+)\}"/);
+  assert(m, 'pack.sh 必须有 PORT 默认值');
+  const packDefault = m[1];
+
+  assertEqual(packDefault, '18990', 'pack.sh 的默认端口应为 18990');
+  assert(
+    packDefault !== '8890',
+    '默认端口不能是 8890：目标机 8890 被 Docker 里的 uvicorn 长期占用，服务 bind 不上'
+  );
+
+  assert(
+    new RegExp(`DEFAULT_PORT = ${packDefault};`).test(read('server/config.js')),
+    'server/config.js 的 DEFAULT_PORT 必须与 pack.sh 一致'
+  );
+  assert(
+    new RegExp(`DEFAULT_PORT=${packDefault}\\b`).test(read('fnos/cmd/main')),
+    'cmd/main 的 DEFAULT_PORT 必须与 pack.sh 一致'
+  );
+  assert(
+    new RegExp(`service_port: '${packDefault}'`).test(read('build/gen-fnpack.js')),
+    'gen-fnpack.js 的 service_port 必须与 pack.sh 一致（否则 fnDepot 声明与实际不符）'
+  );
+  assert(
+    new RegExp(`args\\.port \\|\\| '${packDefault}'`).test(read('build/gen-manifest.js')),
+    'gen-manifest.js 的 port 兜底值必须与 pack.sh 一致'
+  );
+  const resource = JSON.parse(read('fnos/config/resource'));
+  assertEqual(
+    String(resource.port),
+    packDefault,
+    'fnos/config/resource 的 port 必须与 pack.sh 一致'
+  );
+});
+
+test('pack.sh 把同一个 $PORT 同时注入 ui/config 与 config/resource', () => {
+  // 只注入一处会留下「图标指 A、服务听 B」的分叉。两者同源是这条的唯一目的。
+  const fs = require('fs');
+  const path = require('path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'build', 'pack.sh'), 'utf8');
+  assert(/"port":"\$PORT"/.test(src), 'ui/config 的 port 应由 $PORT 注入');
+  assert(/PKGROOT\/config\/resource/.test(src), 'pack.sh 必须改写 config/resource');
+  assert(/obj\.port = Number\(port\)/.test(src), 'resource 的 port 应被写成数字');
+
+  // 两处注入都必须在 gen-manifest 算 checksum 之前，否则 checksum 与包内容不符
+  const manifestIdx = src.indexOf('gen-manifest.js"');
+  assert(manifestIdx > 0, 'pack.sh 应调用 gen-manifest');
+  assert(src.indexOf('"port":"$PORT"') < manifestIdx, 'ui/config 注入必须在 checksum 之前');
+  assert(src.indexOf('PKGROOT/config/resource') < manifestIdx, 'resource 端口注入必须在 checksum 之前');
+});
+
+test('cmd/main 的端口来源按 TRIM_SERVICE_PORT → ui/config → 默认值降级', () => {
+  // ui/config 是「图标点开的端口」，服务跟着它走，避免人工改过 ui/config 后两边漂移。
+  const fs = require('fs');
+  const path = require('path');
+  const os = require('os');
+  const { execFileSync } = require('child_process');
+
+  const mainPath = path.join(__dirname, '..', 'fnos', 'cmd', 'main');
+  const txt = fs.readFileSync(mainPath, 'utf8');
+  const fn = (name) => {
+    const m = txt.match(new RegExp(`^${name}\\(\\) \\{[\\s\\S]*?^\\}`, 'm'));
+    assert(m, `cmd/main 里应有 ${name}()`);
+    return m[0];
+  };
+
+  const run = (script, args) =>
+    execFileSync('sh', ['-c', script, 'x', ...(args || [])], { encoding: 'utf8' }).trim();
+
+  // 造一个只有 ui/config 的假 APPDEST
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'apkstart-port-'));
+  fs.mkdirSync(path.join(tmp, 'ui'), { recursive: true });
+  fs.writeFileSync(
+    path.join(tmp, 'ui', 'config'),
+    '{"url":{"x.main":{"type":"url","protocol":"http","port":"17777","url":"/"}}}',
+    'utf8'
+  );
+
+  const fromUi = run(`${fn('port_from_uiconfig')}\nAPPDEST="$1"; port_from_uiconfig`, [tmp]);
+  assertEqual(fromUi, '17777', 'ui/config 里的 port 应被解析出来');
+
+  // 没有 ui/config 时返回非零（走默认值分支）
+  const empty = fs.mkdtempSync(path.join(os.tmpdir(), 'apkstart-nouiconfig-'));
+  const noUi = run(`${fn('port_from_uiconfig')}\nAPPDEST="$1"; port_from_uiconfig || echo NONE`, [empty]);
+  assertEqual(noUi, 'NONE', '缺 ui/config 时应走默认值');
+
+  // resolve_port 依赖 port_from_uiconfig，两个都要带上（否则「命令不存在」会被当成走默认值）
+  const portFns = `${fn('port_from_uiconfig')}\n${fn('resolve_port')}`;
+  const resolved = run(`${portFns}\nDEFAULT_PORT=18990; APPDEST="$1"; PORT=""; resolve_port`, [tmp]);
+  assertEqual(resolved, '17777', 'resolve_port 应优先采信 ui/config');
+
+  const envWins = run(
+    `${portFns}\nDEFAULT_PORT=18990; APPDEST="$1"; PORT="19999"; resolve_port`,
+    [tmp]
+  );
+  assertEqual(envWins, '19999', 'TRIM_SERVICE_PORT 应压过 ui/config（平台说了算）');
+});
+
+test('cmd/main 在拉起 node 之前探测端口占用，并说明占用者与改法', () => {
+  // 与其让 node 抛 EADDRINUSE 秒退、安装器只回显日志尾部，不如先探测再报错。
+  const fs = require('fs');
+  const path = require('path');
+  const { execFileSync, spawn } = require('child_process');
+
+  const txt = fs.readFileSync(path.join(__dirname, '..', 'fnos', 'cmd', 'main'), 'utf8');
+  const busyFn = txt.match(/^port_busy\(\) \{[\s\S]*?^\}/m);
+  assert(busyFn, 'cmd/main 里应有 port_busy()');
+
+  const probe = (p) =>
+    execFileSync('sh', ['-c', `${busyFn[0]}\nport_busy "$1" && echo BUSY || echo FREE`, 'x', String(p)], {
+      encoding: 'utf8',
+    }).trim();
+
+  // 真起一个监听口再探，避免「语法对但字段名写错」这种假绿。
+  // 同步等它 LISTEN：用 sleep 子进程阻塞主线程，测试仍是同步风格。
+  const port = 32000 + Math.floor(Math.random() * 2000);
+  const child = spawn(
+    process.execPath,
+    ['-e', `const s=require('net').createServer(()=>{});s.listen(${port},'127.0.0.1');setTimeout(()=>process.exit(0),30000);`],
+    { stdio: 'ignore' }
+  );
+  let busy = false;
+  try {
+    for (let i = 0; i < 40 && !busy; i += 1) {
+      busy = probe(port) === 'BUSY';
+      if (!busy) execFileSync('sleep', ['0.05']);
+    }
+    assertEqual(busy, true, `端口 ${port} 已监听，port_busy 应判为占用`);
+  } finally {
+    child.kill();
+  }
+
+  // 顺序：探测必须在 nohup 拉起之前，否则等于没探
+  const startAt = txt.indexOf('do_start()');
+  const busyIdx = txt.indexOf('port_busy "$PORT"');
+  const spawnIdx = txt.indexOf('nohup "$NODE" "$SERVER_JS"');
+  assert(busyIdx > startAt, 'do_start 里应有 port_busy 检查');
+  assert(spawnIdx > busyIdx, 'port_busy 必须发生在拉起 node 之前');
+  assert(/ui\/config/.test(txt.slice(busyIdx, busyIdx + 900)), '报错文案应指出改 ui/config 的 port');
 });
 
 /* ------------------------------------------------------------------ */

@@ -15,7 +15,8 @@ DATA_ROOT="${TRIM_PKGVAR:-${TRIM_APPDATA:-$HOME/.apkstart}}"
 LOG_DIR="$DATA_ROOT/logs"
 PID_FILE="$DATA_ROOT/service.pid"
 LOG_FILE="$LOG_DIR/service.log"
-PORT="${TRIM_SERVICE_PORT:-8890}"
+PORT="${TRIM_SERVICE_PORT:-}"
+DEFAULT_PORT=18990
 HEALTH_TIMEOUT=20   # 秒
 HEALTH_INTERVAL=1
 
@@ -46,9 +47,58 @@ read_pid() {
   [ -f "$PID_FILE" ] && cat "$PID_FILE" 2>/dev/null | tr -d '[:space:]'
 }
 
+# ---------- 端口解析与占用探测（IMPL 偏差 15） ----------
+# 为什么不再写死一个数：目标机上 8890 被 Docker 里的 uvicorn（`uvicorn app.main:app
+# --port 8890`，root）长期占用，我们 bind 不上，进程秒退，安装器只能看到「启动失败 +
+# 日志尾部」这种二手信息。端口必须是可解释、可探测、可改的：
+#   ① 优先 TRIM_SERVICE_PORT（平台注入时听平台的）
+#   ② 其次读 ui/config 的 "port" —— 那是桌面图标点击时用的端口，服务跟着它走，
+#      两者不会出现「图标指 A、服务听 B」的漂移（虽然 pack.sh 用同一个 $PORT 注入，
+#      但人工改 ui/config 或平台改写时这条兜底就有用）
+#   ③ 最后回落 DEFAULT_PORT
+# 用 sed 而不是 node 解析：这一步发生在 resolve_node 之前，不能假设 node 可用。
+port_from_uiconfig() {
+  f="$APPDEST/ui/config"
+  [ -f "$f" ] || return 1
+  p="$(sed -n 's/.*"port"[[:space:]]*:[[:space:]]*"\([0-9][0-9]*\)".*/\1/p' "$f" 2>/dev/null | head -n1)"
+  [ -n "$p" ] || return 1
+  echo "$p"
+}
+
+resolve_port() {
+  if [ -n "${PORT:-}" ]; then echo "$PORT"; return 0; fi
+  if p="$(port_from_uiconfig)"; then echo "$p"; return 0; fi
+  echo "$DEFAULT_PORT"
+}
+
+# 端口是否已被**别的进程**监听。只判「有人在听」，不判对方是谁：
+# 走到这里时自己的 pidfile 已被判过（幂等分支在上面），所以命中就是外部占用。
+port_busy() {
+  p="$1"
+  [ -n "$p" ] || return 1
+  if command -v ss >/dev/null 2>&1; then
+    ss -ltn "sport = :$p" 2>/dev/null | grep -q LISTEN
+  elif command -v netstat >/dev/null 2>&1; then
+    # 注意别写成 netstat -ltn：macOS/BSD 的 netstat 不认 -l（照样列出 ESTABLISHED），
+    # 结果永远匹配不到 LISTEN（本地跑测试时就是这么发现写错了）。用 -an 再筛 LISTEN，
+    # 两种实现的地址分隔符不同（Linux `0.0.0.0:PORT`、BSD `127.0.0.1.PORT`），故用 [:.]。
+    netstat -an 2>/dev/null | grep -E "[:.]$p[[:space:]]" | grep -q LISTEN
+  else
+    return 1   # 没有探测工具时不拦，交给 bind 自己失败
+  fi
+}
+
+# 尽力回显占用者。非 root 跑时 ss -p 拿不到别人的进程信息，属正常，回显空。
+port_holder() {
+  p="$1"
+  ss -ltnp "sport = :$p" 2>/dev/null | sed -n '2,$p' | grep -o 'users:(.*)' | head -n1
+}
+
 # ---------- 健康检查（用 node 自身，避免依赖 curl） ----------
-# 只看状态码是不够的：目标机上 8890 曾被第三方服务（uvicorn）占用，其 /api/health
-# 同样返回 200，导致「别人的服务」被当成自己启动成功（假成功）。因此必须校验响应体：
+# 只看状态码是不够的：默认端口 8890 在目标机上曾被第三方服务（uvicorn）占用，它的
+# /api/health 同样返回 200，导致「别人的服务」被当成自己启动成功（假成功）。端口虽然
+# 已在 0.2.3 换到 18990，这个「校验响应体而非状态码」的判据仍然必须保留——任何端口
+# 都可能被别人占，而 200 从来不等于「是我的服务」。因此必须校验响应体：
 #   ① statusCode === 200
 #   ② body.app === 'apkstart-fnos'
 #   ③ body.pid 存在且 等于 $PID_FILE 中的 pid（防止上一次残留实例被误认）
@@ -59,7 +109,7 @@ health_ok() {
     const wantPid = Number(process.env.HK_PID) || 0;
     const opts = process.env.HK_SOCK
       ? { socketPath: process.env.HK_SOCK, path: "/api/health", timeout: 1500 }
-      : { host: "127.0.0.1", port: Number(process.env.HK_PORT) || 8890, path: "/api/health", timeout: 1500 };
+      : { host: "127.0.0.1", port: Number(process.env.HK_PORT) || 18990, path: "/api/health", timeout: 1500 };
     const req = http.get(opts, (res) => {
       if (res.statusCode !== 200) { res.resume(); return process.exit(1); }
       let body = "";
@@ -118,6 +168,10 @@ do_start() {
   NODE="$(resolve_node)" || { log "resolve_node 失败"; return 1; }
   export NODE
 
+  # 端口必须在健康检查之前定下来：health_ok 用它发请求
+  PORT="$(resolve_port)"
+  export PORT
+
   # 幂等：已运行
   pid="$(read_pid)"
   if pid_alive "$pid"; then
@@ -133,6 +187,22 @@ do_start() {
   if [ ! -f "$SERVER_JS" ]; then
     log "未找到服务入口: $SERVER_JS"
     echo "未找到服务入口: $SERVER_JS" >&2
+    return 1
+  fi
+
+  # 启动前探测端口：与其让 node 抛 EADDRINUSE 秒退、再让安装器回显日志尾部，
+  # 不如在这里就说清「谁占了、怎么办」。
+  # 走 unix socket 时（P1 网关方案）没有端口可占，跳过探测
+  if [ -z "${LISTEN_SOCKET:-}" ] && port_busy "$PORT"; then
+    holder="$(port_holder "$PORT")"
+    log "端口 ${PORT} 已被占用，拒绝启动（占用者: ${holder:-未知}）"
+    {
+      echo "ApkStart 无法启动：端口 ${PORT} 已被其他程序占用${holder:+，占用者 $holder}。"
+      echo "  图标指向的端口来自 ${APPDEST}/ui/config，改这里的 \"port\" 即可换端口"
+      echo "  （改成空闲端口后重新启动本服务）；也可以让占用该端口的程序换端口。"
+      echo "  当前监听情况："
+      ss -ltn "sport = :$PORT" 2>/dev/null | sed -n '1,3p' || true
+    } >&2
     return 1
   fi
 

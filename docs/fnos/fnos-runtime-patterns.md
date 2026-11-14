@@ -39,7 +39,7 @@ esac
 ```jsonc
 // A. 直连端口（wechat-on-cloud 用法；本次采用）
 {".url": {"<app>.main": {title, icon:"images/icon_{0}.png", type:"url",
-  protocol:"http", port:"8890", url:"/", allUsers:true}}}
+  protocol:"http", port:"18990", url:"/", allUsers:true}}}
 
 // B. 统一网关（fndepot 用法；需监听 unix socket，鉴权由 NAS 处理，P1 可选）
 {"type":"iframe", "gatewaySocket":"<app>.sock", "gatewayPrefix":"/app/<app>", "url":"/app/<app>"}

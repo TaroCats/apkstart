@@ -150,7 +150,7 @@ function main() {
         install_type: '',
         is_docker: false,
         // 真实源为字符串（"9080" / "7401" / "7983"），不是数字
-        service_port: '8890',
+        service_port: '18990',
         releases: {
           [version]: current,
           ...history,

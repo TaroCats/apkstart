@@ -644,10 +644,104 @@ TRIM_APPDEST=/tmp/apkverify/appdest TRIM_PKGVAR=/tmp/apkverify/var TRIM_SERVICE_
 
 **附带**：macOS 的 bsdtar 会把 Apple 扩展属性写成 PAX 头
 （`LIBARCHIVE.xattr.com.apple.provenance`），fnOS 侧 GNU tar 解包时逐文件打印
-"忽略未知的扩展头关键字"。无害但噪声大，也让本地包与 CI 包字节不一致；`pack.sh` 在非 GNU tar
-分支加上 `--no-mac-metadata`。
+"忽略未知的扩展头关键字"。无害但噪声大，也让本地包与 CI 包字节不一致。
+0.2.2 当时在非 GNU tar 分支加了 `--no-mac-metadata`——**这个参数不够**（见偏差 15 末尾），
+真正关掉的是 `--no-xattrs`。
 
 **版本处置**：`0.2.0`（wizard 坏）、`0.2.1`（包结构坏）两个资产都**不覆盖**，发 `0.2.2`。
+
+### 偏差 15 — 默认端口 8890 在目标机被 Docker 里的 uvicorn 占用；端口必须以 `ui/config` 为单一真源（0.2.3 修复）
+
+**症状**：装完起不来，`cmd/main start` 报「服务进程已退出，健康检查未通过」，日志尾部是
+`listen EADDRINUSE`。
+
+**取证**（目标机 10.31.0.4）：
+
+```console
+# lsof -i:8890 / ss -ltnp "sport = :8890"
+uvicorn 1268089 root  ... TCP *:8890 (LISTEN)
+# tr '\0' ' ' < /proc/1268089/cmdline
+/usr/local/bin/python3.12 /usr/local/bin/uvicorn app.main:app --host 0.0.0.0 --port 8890 --proxy-headers
+# ls -l /proc/1268089/cwd
+/proc/1268089/cwd -> /app          ← Docker 容器里的服务，不是宿主进程，动不了
+```
+
+同机另被占用：`8899`（docker-proxy）、`18080`，而 `8890` 是**长期占用**（不是偶发）。
+平台侧也不给兜底：manifest 里我们写的是 `checkport=false`，App Center 不做端口自检；
+`grep -r TRIM_SERVICE_PORT /var/apps/*/target/cmd/` **一个应用都没用到**，说明平台不注入这个变量，
+`cmd/main` 只能落到自己的默认值。
+
+**平台惯例**（9 个已装第三方应用的 `ui/config`）：
+
+| 写法 | 例子 | 说明 |
+|---|---|---|
+| 写死端口 | `"port": "9080"` / `"7401"` / `"7983"` / `"8089"` / `"8899"` | 多数应用的选择，撞了就装不上，属于「应用自己的责任」 |
+| 占位符 | OpenList `"${port}"`、dpanel `"${DP_APP_SERVER_PORT}"`、wechat-on-cloud `"${WOC_HTTP_PORT}"` | 由平台/应用自己的配置替换，语义未公开 |
+| 空串 + 网关 socket | fygo-browser `"port": ""` + `gatewaySocket` / `gatewayPrefix` | 完全不占 TCP 端口，见下文「未采用的方案」 |
+
+**根因**：端口在 `pack.sh` / `config.js` / `cmd/main` / `gen-fnpack` / `gen-manifest` / `config/resource`
+六处各写一遍 `8890`，任何一处改不动就漂移；而且启动前不探测，撞上了只能靠 node 的 `EADDRINUSE`
+让进程秒退，安装器再把日志尾部当作错误回显——**信息量最低的失败方式**。
+
+**做法**（`0.2.3`）：
+
+1. **默认端口改 `18990`**（目标机实测空闲，避开同机已占的 8890/8899/18080/18890）。
+2. **端口来源按优先级降级**：`TRIM_SERVICE_PORT` → `ui/config` 的 `"port"` → `DEFAULT_PORT`。
+   `ui/config` 是「图标点开的端口」，服务跟着它走，两者不可能出现「图标指 A、服务听 B」；
+   平台真注入 `TRIM_SERVICE_PORT` 时仍以平台为准。解析用 `sed` 而不是 node——这步发生在
+   `resolve_node` 之前，不能假设 node 可用。
+3. **启动前探测端口**（`port_busy`）：有人在听就**拒绝启动**，并在 stderr 点名占用者与改法
+   （「改 `${APPDEST}/ui/config` 的 port」）。有 `ss` 用 `ss`，否则退 `netstat -an`。
+   > 写这块时被自己的单测抓到一次真错：`netstat -ltn` 在 macOS/BSD 上不认 `-l`（照样列出
+   > ESTABLISHED），于是永远匹配不到 LISTEN。改成 `netstat -an | grep -E "[:.]PORT\s" | grep LISTEN`，
+   > 两种实现的地址分隔符不同（Linux `0.0.0.0:PORT`、BSD `127.0.0.1.PORT`），所以用 `[:.]`。
+4. **同一份 `$PORT` 注入两处**：`ui/config` 与 `config/resource`（`pack.sh` 新增 3.2 步），
+   避免「声明 A、实际听 B」的分叉；`gen-manifest.js` 的兜底值、`gen-fnpack.js` 的
+   `service_port` 同步改到 `18990`。
+5. **保留「校验响应体而非状态码」的健康检查**：0.1.0 时期曾出现 uvicorn 的 `/api/health`
+   也返回 200，被判成「我们的服务启动成功」（假成功）。端口换了不代表这个判据可以删——
+   任何端口都可能被别人占，200 从来不等于「是我的服务」。
+
+**真机验证**（等价安装，不走 App Center）：
+
+```console
+# 默认端口：不给 TRIM_SERVICE_PORT，让它从 ui/config 读
+$ TRIM_APPDEST=/tmp/apk23/appdest TRIM_PKGVAR=/tmp/apk23/var sh .../cmd/main start
+rc=0
+$ ss -ltn "sport = :18990" | tail -1
+LISTEN 0 511 0.0.0.0:18990 0.0.0.0:*
+$ curl -s 127.0.0.1:18990/api/health
+{"app":"apkstart-fnos","status":"ok","version":"0.2.3","pid":52084,"node":"v22.23.4"}
+
+# 撞端口：显式指到被 uvicorn 占着的 8890
+$ TRIM_SERVICE_PORT=8890 sh .../cmd/main start
+ApkStart 无法启动：端口 8890 已被其他程序占用，占用者 users:(("uvicorn",pid=1268089,fd=12))。
+  图标指向的端口来自 /tmp/apk23/appdest/ui/config，改这里的 "port" 即可换端口
+rc=1
+```
+
+**顺带修掉的真错**：`pack.sh` 在非 GNU tar 分支写的 `--no-mac-metadata` **并不抑制 xattr PAX 头**。
+实测（bsdtar 3.5.3 / libarchive 3.7.4）同一文件：不加参数 1 个头、`--no-mac-metadata` 仍 1 个、
+`--no-xattrs` 才 0 个。0.2.2 那条「已修」是假的——包内仍有 43 个 `LIBARCHIVE.xattr` 头，
+真机解包照样刷屏。0.2.3 改为 `--no-mac-metadata --no-xattrs`，并在打包末尾加兜底检查
+（命中就告警），包内 PAX 头计数降为 0，真机解包噪声 0 行。
+
+**未采用的方案：网关 socket（`port: ""` + `gatewaySocket`）**。平台支持得比我们想的干净：
+
+```jsonc
+// fygo-browser 的 ui/config
+{"type": "iframe", "port": "", "gatewaySocket": "app.sock", "gatewayPrefix": "/app/fygo-browser"}
+// fnmusic-hub（$APPDEST/fnmusic-hub.sock 是它自己监听的 unix socket）
+{"type": "iframe", "protocol": "", "gatewaySocket": "fnmusic-hub.sock", "gatewayPrefix": "/app/fnmusic-hub"}
+```
+
+这条路**一个 TCP 端口都不占**，撞端口问题从根上消失，`server/http/server.js` 也早就预留了
+`LISTEN_SOCKET` 分支。这轮没切换的原因是风险收益不划算：`ui/api.js` / `screen.js` 里所有请求
+都写成绝对路径 `/api/...`，挂到 `/app/apkstart-fnos` 前缀下会全部 404，得先整体改成相对路径；
+而网关的前缀剥离/透传行为**只能靠真实 App Center 验证**，本地无法复现。先把「撞端口」用
+可验证的最小改动解决，网关化留作 P1（届时需要一次真机安装来验收）。
+
+**版本处置**：`0.2.0` / `0.2.1` 不可用（wizard / 包结构），`0.2.2` 能装但端口可能撞，发 `0.2.3`。
 
 ### 附：已按真机实测校正的参数（非偏差，属对齐）
 

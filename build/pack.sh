@@ -1,17 +1,18 @@
 #!/usr/bin/env bash
 # =============================================================================
 # ApkStart for fnOS 打包主脚本（ARCH §7.1）
-#   1) 生成图标   2) 组装 stage  3) 生成 ui 入口 config  3.8) 负载→根级 app.tgz
+#   1) 生成图标   2) 组装 stage  3) 生成 ui 入口 config  3.2) 同步 resource 端口
+#   3.8) 负载→根级 app.tgz
 #   4) 生成 manifest  5) tar.gz→.fpk  5.5) 校验包结构  6) sha256  7) fnpack 片段
 # 可复现：Linux 下固定 --mtime/--owner/--group/--sort（同 tag 重跑 sha256 稳定）。
-# 用法：bash build/pack.sh --version 0.1.0 [--port 8890] [--changelog "说明"]
+# 用法：bash build/pack.sh --version 0.1.0 [--port 18990] [--changelog "说明"]
 # =============================================================================
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APPNAME="apkstart-fnos"
 VERSION="${VERSION:-0.1.0}"
-PORT="${PORT:-8890}"
+PORT="${PORT:-18990}"
 CHANGELOG="${CHANGELOG:-}"
 
 # ---- 解析参数 ----
@@ -77,6 +78,18 @@ cat > "$APPSTAGE/ui/config" <<EOF
 {".url":{"$APPNAME.main":{"title":"ApkStart","icon":"images/icon_64.png","type":"url","protocol":"http","port":"$PORT","url":"/","allUsers":true}}}
 EOF
 
+# ---- 3.2) 同步 config/resource 的 port（与 ui/config 同源）----
+# 两处端口必须一致：ui/config 决定「图标点开的端口」，config/resource 是包声明给平台的
+# 资源信息。只改一处会留下「声明 A、实际听 B」的分叉，排障时最费时间。
+node - "$PKGROOT/config/resource" "$PORT" <<'NODE'
+const fs = require('fs');
+const [file, port] = process.argv.slice(2);
+const obj = JSON.parse(fs.readFileSync(file, 'utf8'));
+obj.port = Number(port);
+fs.writeFileSync(file, JSON.stringify(obj, null, 2) + '\n', 'utf8');
+console.log(`config/resource 端口已注入: ${port}`);
+NODE
+
 # ---- 3.5) 注入包内版本兜底值（必须在 gen-manifest 算 checksum 之前）----
 # config.js 里 `process.env.APKSTART_VERSION || 'x.y.z'` 的兜底值是静态写死的，
 # 不注入的话包里运行时报的版本永远是源码里那个（0.1.0）。运行时没人会设
@@ -107,8 +120,12 @@ else
   # bsdtar（macOS 默认）会把 Apple 扩展属性写成 PAX 头
   # （LIBARCHIVE.xattr.com.apple.provenance），fnOS 侧 GNU tar 解包时逐文件报
   # 「忽略未知的扩展头关键字」。无害但噪声很大，且本地包与 CI 包字节不一致。
-  REPRO_FLAGS=(--no-mac-metadata)
-  echo "==> 非 GNU tar（${TAR_VER}），跳过 owner/mtime 固定，仅关掉 mac 扩展属性（本地开发可接受）"
+  #
+  # 实测（bsdtar 3.5.3 / libarchive 3.7.4）：**`--no-mac-metadata` 并不够**，
+  # 照样写出 1 个 LIBARCHIVE.xattr 头；真正关掉的是 `--no-xattrs`。两个都留，
+  # 前者管 ACL/资源叉，后者管 xattr 本身。0.2.2 只加了前者，等于没修。
+  REPRO_FLAGS=(--no-mac-metadata --no-xattrs)
+  echo "==> 非 GNU tar（${TAR_VER}），跳过 owner/mtime 固定，仅关掉 mac 扩展属性/xattr（本地开发可接受）"
 fi
 
 # macOS 打包避免 ._ 资源叉文件（内层与外层 tar 都要）
@@ -140,6 +157,15 @@ tar -czf "$FPK" -C "$STAGE" ${REPRO_FLAGS[@]+"${REPRO_FLAGS[@]}"} "$APPNAME"
 # ---- 5.5) 校验包结构（拦截「app/ 目录而非 app.tgz」这类装不上但能构建的包）----
 # 0.2.1 就是这样发出去的：本地看不出问题，只有真机装到一半才报 10107。
 node "$ROOT/build/validate-package.js" "$FPK"
+
+# 5.6) 兜底：确认包里没有 Apple 扩展属性的 PAX 头
+# 只有 macOS 本地打包会出这个（bsdtar 把 xattr 写进 PAX 头），真机 GNU tar 解包时
+# 会逐文件打印「忽略未知的扩展头关键字」。不影响功能，但会让安装日志充满噪声、
+# 也掩盖真正要看的那几行。这里二次确认，避免 REPRO_FLAGS 被顺手改回去。
+if gzip -dc "$FPK" 2>/dev/null | strings | grep -q 'LIBARCHIVE\.xattr'; then
+  echo "!! 警告：包内仍含 Apple 扩展属性 PAX 头（真机解包会刷一屏噪声）" >&2
+  echo "!! 请检查 pack.sh 的 REPRO_FLAGS：需要 --no-xattrs，单靠 --no-mac-metadata 不够" >&2
+fi
 
 # ---- 6) sha256 ----
 if command -v sha256sum >/dev/null 2>&1; then
