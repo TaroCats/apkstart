@@ -2,7 +2,9 @@
 # =============================================================================
 # 卸载后（ARCH §6.2 / P1-9 扩展位）：
 #   默认保留用户数据（apps.json/settings.json），
-#   可选删除运行时/AVD：设置 TRIM_UNINSTALL_PURGE=1 或 wizard 传入 purge=true。
+#   可选删除运行时/AVD：设置 TRIM_UNINSTALL_PURGE=1（外部传入该环境变量才生效）。
+#   注意：wizard 的 field 值不会传到脚本侧（fnOS 只在前端做表单校验），
+#   所以 wizard/uninstall 里没有 switch/time purge，改成 tips 说明保留策略。
 # =============================================================================
 set -u
 

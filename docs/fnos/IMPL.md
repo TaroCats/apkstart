@@ -74,7 +74,8 @@ disable_authorization_path=true
 
 ### 1.5 构建与 CI
 
-`build/pack.sh`（7 步：图标 → stage → ui/config → manifest → tar.gz→fpk → sha256 → fnpack 片段）、`build/gen-icons.js`、`build/gen-manifest.js`、`build/gen-fnpack.js`、`.github/workflows/release.yml`。
+`build/pack.sh`（图标 → stage → **wizard 契约校验** → ui/config → 版本注入 → manifest → tar.gz→fpk → sha256 → fnpack 片段）、`build/gen-icons.js`、`build/gen-manifest.js`、`build/gen-fnpack.js`、`build/validate-wizard.js`、`.github/workflows/release.yml`。
+> `validate-wizard.js` 是 0.2.0「App Center 装不上」事故的护栏（IMPL 偏差 13）：校验的是 **stage 里那份**（真正进包的那份），顶层不是数组就不许打包；同一份逻辑被 `test/fnos-unit.js` 复用，所以 Linux CI job 会红在 PR 上。
 > `build/` 下仍保留上游 Electron 版遗留脚本（`pack.js`、`prepare-runtime.js`、`render-logo.js` 等），**不参与** fnOS 打包链路，未删除以免破坏上游仓库。旧 Windows/Electron 发布流水线文本存档于 `docs/fnos/legacy-release-electron.yml.txt`。
 
 ---
@@ -501,6 +502,52 @@ topResumedActivity=ActivityRecord{42387ca u0 com.google.android.apps.nexuslaunch
 4. 单测夹具**逐字使用真机原文 A 的两行**（含前导两个空格与 `Window{7061971 u0 ` / `Window{626b07c u0 ` 的 token），并额外构造「focus 是弹窗 + mFocusedApp 仍是 launcher」的组合夹具（来源即原文 B 的结构），断言 `package === 'com.android.systemui'` / `'android'`、`source === 'dialog'`、`systemSurface === true`，且弹窗优先级高于 resumed。
 
 **已知备注（不影响验收，本次不改代码）**：这版镜像的蓝牙包名是 Google 模块名 `com.google.android.bluetooth`，而 AOSP 是 `com.android.bluetooth`；`isSystemSurface()` 白名单里只有后者。当前不影响结果——`parseSystemDialog()` 命中时 `systemSurface` 直接置 `true`，不经过白名单。只有「该包名出现在 resumed/focus 的正常分支」时（例如蓝牙 Activity 自己跑到前台）才会漏判为「非系统界面」，届时把 `com.google.android.bluetooth` 加进白名单即可。
+
+### 偏差 13 — wizard 顶层必须是数组 `[]trimpkg.WizardPage`；`field` 值不进脚本（0.2.0 装不上，0.2.1 修复）
+
+**症状（用户报，0.2.0 首次走 App Center 安装）**：
+
+```
+获取安装信息失败: checkPackage installWizard
+  /vol2/appcenter-downloads/apkstart-fnos-0.2.0-tpk/wizard/install is not exist: 100610
+| wizard invalid: json: cannot unmarshal object into Go value of type []trimpkg.WizardPage
+```
+
+**排查路径（顺手排除了一个假线索）**：先怀疑"文件没进包"。SSH 上看目标机 `/var/apps/apkstart-fnos/wizard/install` 与解包目录 `/vol2/appcenter-downloads/apkstart-fnos-0.2.0-tpk/wizard/install` **都存在（473 B）**，`tar -tzf` 顶层结构也对（`app/ cmd/ config/ ICON* manifest wizard/`）。所以 **报错里的 "is not exist: 100610" 是误导文案**——fnOS 把"JSON 解析失败"也说成"不存在"，真正原因只看后半句 `cannot unmarshal object`。
+
+**真因**：我们把 wizard 写成了对象
+
+```json
+{ "title": "ApkStart 安装向导", "description": "…", "steps": [{ "type": "info", … }] }
+```
+
+而 fnOS 的 Go 侧是 `json.Unmarshal(buf, &[]trimpkg.WizardPage{})`，顶层类型是**切片**，给对象必挂。
+`0.1.0` 从没走过 App Center（是手工解包装的），所以这个错一直没暴露；`0.2.0` 是第一次真实 App Center 安装。
+
+**契约（从目标机 3 个已装应用反向确认的 ground truth，非文档推测）**：
+
+| 层级 | 结构 |
+| --- | --- |
+| 顶层 | `Array<WizardPage>`（**必须是数组**） |
+| `WizardPage` | `{ stepTitle: string, items: WizardItem[] }` |
+| `WizardItem` | `tips` → `{ type:'tips', helpText }`；`switch` → `{ type:'switch', field, label, rules? }`；`text` → `{ type:'text', field, label, rules? }` |
+| `Rule` | `{ required?: boolean, pattern?: string, message?: string }` |
+
+取证来源：`fn-scheduler`（tips）、`cloudlink-finder`（switch + rules.required）、`baidu.netdisk`（text + rules.pattern `^确认$`）。
+
+**第二个结论（同样影响设计）：`field` 的值不会传到 `cmd/*` 脚本。**
+在 `cloudlink-finder`、`dpanel` 的 `cmd/*` 里 grep `TRIM_WIZARD` / `wizard` 零命中（只命中 wizard 文件自身）——`field` 只参与**前端表单校验**。所以 `uninstall_callback` 读的 `TRIM_UNINSTALL_PURGE` 环境变量**不可能**由向导勾选产生；原先 PRD P1-9 说的"wizard 选择生效"在 fnOS 上做不到。
+
+> 因此 `wizard/uninstall` 没有做成"勾了就删数据"的 `switch`——那会是个**假开关**（勾了不生效）。改成两段 `tips` 说明"数据会保留 + 怎么手动清"，脚本侧仍只认外部传入的 `TRIM_UNINSTALL_PURGE=1`。同时删掉 `uninstall_callback` 头注释里"或 wizard 传入 purge=true"这句不成立的承诺。
+
+**修复与护栏**：
+
+1. `fnos/wizard/install` / `uninstall` 全部改为顶层数组；`install` 用两个 `tips`（在线包说明、GPU 可选说明）。
+2. 新增 `build/validate-wizard.js`：校验顶层是数组、`stepTitle` 非空、`items` 非空、`type` 在白名单内（`tips`/`switch`/`text`）、各类型必填键、`rules` 形状；并强制 `install`、`uninstall` 两个文件都在。
+3. `build/pack.sh` 第 2.5 步校验**stage 里那份**（即真正进包的那份），不通过就不打包。
+4. 单测 3 例（`test/fnos-unit.js`，64 → 67）：仓库内 wizard 全过校验；校验器能拒掉对象格式 / 非法 JSON / 缺 `stepTitle` / 未知 `type`；`uninstall` 里不许出现 `field`（防假开关回潮）。Linux CI job 直接跑这份单测，所以红会红在 PR 上。
+
+**版本处置**：`0.2.0` 的资产对 App Center 安装是坏的，**不覆盖**已有 Release（有用户可能已下载/做校验），直接发 `0.2.1`。
 
 ### 附：已按真机实测校正的参数（非偏差，属对齐）
 

@@ -687,6 +687,63 @@ test('未知模式一律回落 off（不让拼写错误变成 2 秒崩溃）', (
 });
 
 /* ------------------------------------------------------------------ */
+/* wizard 契约（0.2.0 真机安装失败的回归护栏）                          */
+/*   wizard 顶层必须是数组（[]trimpkg.WizardPage），给对象会报：        */
+/*   "json: cannot unmarshal object into Go value of type              */
+/*    []trimpkg.WizardPage"，且报错文案伪装成 "is not exist: 100610"。 */
+/* ------------------------------------------------------------------ */
+
+test('仓库内 fnos/wizard/* 全部通过契约校验（顶层数组 + 已知 item 类型）', () => {
+  const path = require('path');
+  const { validateDir } = require('../build/validate-wizard');
+  const res = validateDir(path.join(__dirname, '..', 'fnos', 'wizard'));
+  assertEqual(res.errors.length, 0, 'wizard 校验失败：\n      ' + res.errors.join('\n      '));
+  assertEqual(res.files, 2, 'install 与 uninstall 两个文件都要在');
+  assert(res.pages >= 2, '每个文件至少一页');
+});
+
+test('校验器能抓住 0.2.0 的对象格式（顶层对象 → 必须报错）', () => {
+  const fs = require('fs');
+  const os = require('os');
+  const path = require('path');
+  const { validateFile } = require('../build/validate-wizard');
+
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'wizard-'));
+  try {
+    const bad = path.join(tmp, 'install');
+    fs.writeFileSync(bad, '{"title":"x","description":"y","fields":[{"key":"purge","type":"boolean"}]}');
+    const r = validateFile(bad);
+    assert(r.errors.length > 0, '顶层对象必须被拒绝（否则真机上一定是 wizard invalid）');
+    assert(/顶层必须是数组/.test(r.errors[0]), '错误信息要指出顶层类型问题');
+
+    // 非法 JSON 也要报错，而不是抛异常
+    const broken = path.join(tmp, 'uninstall');
+    fs.writeFileSync(broken, '[{"stepTitle":');
+    assert(validateFile(broken).errors.length > 0, '非法 JSON 必须被拒绝');
+
+    // 缺 stepTitle / 未知 item type 也要被拒绝
+    const noTitle = path.join(tmp, 'install2');
+    fs.writeFileSync(noTitle, JSON.stringify([{ items: [{ type: 'tips', helpText: 'x' }] }]));
+    assert(validateFile(noTitle).errors.length > 0, '缺 stepTitle 必须被拒绝');
+
+    const badType = path.join(tmp, 'uninstall2');
+    fs.writeFileSync(badType, JSON.stringify([{ stepTitle: 't', items: [{ type: 'checkbox' }] }]));
+    assert(validateFile(badType).errors.length > 0, '未知 item type 必须被拒绝');
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('wizard item 的 field 不进脚本：uninstall_callback 只认 TRIM_UNINSTALL_PURGE', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'fnos', 'cmd', 'uninstall_callback'), 'utf8');
+  assert(/TRIM_UNINSTALL_PURGE/.test(src), '脚本侧应只读环境变量');
+  const wiz = fs.readFileSync(path.join(__dirname, '..', 'fnos', 'wizard', 'uninstall'), 'utf8');
+  assert(!/"field"/.test(wiz), 'uninstall 向导不应放 field 开关（值传不到脚本，等于假开关）');
+});
+
+/* ------------------------------------------------------------------ */
 (async () => {
   for (const { name, fn } of pending) {
     try {

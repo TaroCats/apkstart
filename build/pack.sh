@@ -59,6 +59,12 @@ find "$PKGROOT" -name '.DS_Store' -delete 2>/dev/null || true
 # 可执行权限（cmd/* 必须 0755）
 chmod 0755 "$PKGROOT"/cmd/* 2>/dev/null || true
 
+# ---- 2.5) 校验 wizard 契约（必须在打包前，校验的是真正进包的那份）----
+# wizard 顶层必须是数组 []trimpkg.WizardPage；给对象时 App Center 会报
+#   "wizard invalid: json: cannot unmarshal object into Go value of type
+#    []trimpkg.WizardPage"，文案还伪装成 "is not exist: 100610"（0.2.0 踩过）。
+node "$ROOT/build/validate-wizard.js" "$PKGROOT/wizard"
+
 # ---- 3) 生成 app/ui/config（桌面入口，type:url + port，ARCH §7.4 / §10-4）----
 cat > "$PKGROOT/app/ui/config" <<EOF
 {".url":{"$APPNAME.main":{"title":"ApkStart","icon":"images/icon_64.png","type":"url","protocol":"http","port":"$PORT","url":"/","allUsers":true}}}

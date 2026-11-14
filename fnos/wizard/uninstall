@@ -1,12 +1,15 @@
-{
-  "title": "ApkStart 卸载选项",
-  "description": "是否一并删除已下载的运行时与模拟器数据（runtime / avd）。",
-  "fields": [
-    {
-      "key": "purge",
-      "type": "boolean",
-      "label": "同时删除运行时与模拟器数据（不可恢复）",
-      "default": false
-    }
-  ]
-}
+[
+  {
+    "stepTitle": "卸载确认",
+    "items": [
+      {
+        "type": "tips",
+        "helpText": "卸载将停止 ApkStart 服务并移除程序文件，但会保留以下数据目录，方便日后重新安装时继续使用：\n\n· runtime / avd —— 已下载的 Android 运行时与模拟器实例（约 1GB+）\n· downloads / uploads —— 你上传与下载的 APK\n· apps.json / settings.json —— 应用清单与控制台配置"
+      },
+      {
+        "type": "tips",
+        "helpText": "如需彻底清除，请在卸载后手动删除数据目录（形如 /volX/@appdata/apkstart-fnos，X 为安装所在的数据卷编号）。该操作不可恢复。"
+      }
+    ]
+  }
+]

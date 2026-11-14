@@ -1,11 +1,15 @@
-{
-  "title": "ApkStart 安装向导",
-  "description": "安装完成后，请在 Web 控制台点击「在线部署」下载 Android 运行时（platform-tools / emulator / 系统镜像）。",
-  "steps": [
-    {
-      "type": "info",
-      "title": "运行前须知",
-      "content": "本应用为在线包，不含运行时二进制。首次使用需联网下载约 1GB+ 组件。若无 /dev/kvm 权限，将自动降级为软件模拟（速度较慢）。"
-    }
-  ]
-}
+[
+  {
+    "stepTitle": "安装向导",
+    "items": [
+      {
+        "type": "tips",
+        "helpText": "ApkStart 是「在线包」，不包含 Android 运行时二进制。\n\n安装完成后请打开 Web 控制台，点击「在线部署」，联网下载 platform-tools / emulator / 系统镜像（约 1GB+）。\n\n若 /dev/kvm 不可用，模拟器会自动降级为软件模拟（可用但较慢）。"
+      },
+      {
+        "type": "tips",
+        "helpText": "GPU 硬件加速为可选能力：默认 gpu=auto，检测到可用的硬件 3D X display 与 /dev/dri/renderD128 时自动启用（开机约快 12%），否则与未开启时行为一致，不影响使用。"
+      }
+    ]
+  }
+]

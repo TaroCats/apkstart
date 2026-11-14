@@ -159,8 +159,8 @@ flowchart LR
 | `fnos/cmd/config_callback` | N | 配置变更后：重启服务以使 settings 生效 | 20 |
 | `fnos/config/privilege` | N | JSON：`{"defaults":{"run-as":"package"},"username":"apkstart-fnos","groupname":"apkstart-fnos","join-groups":["all.editor","render","video"]}` | 12 |
 | `fnos/config/resource` | N | JSON：`{"port":8890,"memory_mb":4096,"description":"KVM 无头 Android 运行时"}`（4096 为声明上限，非进程 `-memory`） | 15 |
-| `fnos/wizard/install` | N | 可选：安装向导（首启提示在线下载运行时） | 20 |
-| `fnos/wizard/uninstall` | N | 可选：卸载选项（保留 runtime/avd，P1-9 扩展位） | 20 |
+| `fnos/wizard/install` | N | 安装向导：**顶层数组** `[]trimpkg.WizardPage`，两个 `tips`（在线包说明 / GPU 可选） | 20 |
+| `fnos/wizard/uninstall` | N | 卸载向导：顶层数组，`tips` 说明数据保留策略（无 `switch`，`field` 值不进脚本，见 IMPL 偏差 13） | 20 |
 
 ### 2.5 构建与 CI（`build/`、`.github/workflows/`）
 
@@ -520,7 +520,7 @@ function isArmOnly(abis) {
 | `install_init` | `TRIM_PKGVAR/APPTEMP/APPCONF/APPHOME` | `mkdir -p` 各数据子目录，`chown package`，创建软链；`chmod +x cmd/*` |
 | `install_callback` | `TRIM_PKGVAR` | 写初次安装完成标记；可选 `cmd/main start`（或由应用中心托管启动） |
 | `uninstall_init` | `TRIM_PKGVAR` | `cmd/main stop` → `adb emu kill` → 强杀 emulator/qemu |
-| `uninstall_callback` | `TRIM_PKGVAR/APPTEMP` | 按 wizard 选择保留/删除 `runtime/`、`avd/`；清 `$TRIM_APPTEMP` |
+| `uninstall_callback` | `TRIM_PKGVAR/APPTEMP` | 按 `TRIM_UNINSTALL_PURGE` 保留/删除 `runtime/`、`avd/`、`downloads/`、`uploads/`；清 `$TRIM_APPTEMP`。**wizard 的 `field` 值传不到脚本**，向导只做说明（IMPL 偏差 13） |
 | `upgrade_init` | 数据根（`TRIM_PKGVAR`，回退 `TRIM_APPDATA`） | `cmd/main stop` 优雅停（含 `adb emu kill` + 残留清理）；备份 `settings.json`→`settings.json.bak`；清残留 PID / `uploads/` / `downloads/*.part`；**不动 `runtime/` 与 `.deployed`**；幂等 exit 0 |
 | `upgrade_callback` | 同上 | `cmd/main start`（内置 20s `/api/health` 健康轮询）；失败则还原 `settings.json.bak` 并 exit 1；幂等 |
 | `config_init` | — | 幂等空操作 `exit 0`（P0 无平台配置项，参数走 Web `/api/settings`）；仅满足 fpk 生命周期契约 |
@@ -796,7 +796,7 @@ classDiagram
 - **P1-2 多 AVD**：`EmulatorManager` 已按 `avdName` 参数化，扩展为实例池即可。
 - **P1-3 `.apks/.xapk`**：`api/apk.js` 已对多包返回 `UNSUPPORTED`，接 `adb.installMultiple` 即启用。
 - **P1-7 端口回退**：`config.js` 端口探测钩子预留。
-- **P1-9 卸载清理**：`fnos/wizard/uninstall` 选项 + `uninstall_callback` 分支预留。
+- **P1-9 卸载清理**：`uninstall_callback` 已按 `TRIM_UNINSTALL_PURGE` 分支实现；但 fnOS 的 wizard `field` 值**不会**传到脚本（IMPL 偏差 13），做不到"勾选即删除"，向导改为 `tips` 说明 + 手动清理路径。
 - **P2-1 鉴权**：`http/server.js` 留 `authMiddleware` 空实现挂载点。
 - **P2-4 文件上传**：`api/screen.js` 旁留 `api/files.js` 占位。
 
