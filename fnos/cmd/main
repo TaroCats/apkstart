@@ -101,7 +101,10 @@ do_stop() {
   # 关闭模拟器：优先经 adb，兜底直接杀进程
   # serial 用 adb server 内的设备名 emulator-5554（不是 127.0.0.1:5554：
   # 5554 是 console 端口，adb 走 5555，写 IP:5554 会永远 not found —— 真机实测）
-  ADB_BIN="$APPDEST/runtime/platform-tools/adb"
+  # adb 在**数据根**的 runtime/ 下，不在代码根：运行时组件由服务自己下载到
+  # TRIM_PKGVAR/runtime（见 server/service/paths.js 的 RUNTIME）。
+  # 旧实现写成 $APPDEST/runtime/...，永远 -x 失败，只靠后面的 pkill 兜底（假成功）。
+  ADB_BIN="$DATA_ROOT/runtime/platform-tools/adb"
   if [ -x "$ADB_BIN" ]; then
     ANDROID_ADB_SERVER_PORT="${ANDROID_ADB_SERVER_PORT:-5044}" "$ADB_BIN" -s "emulator-5554" emu kill 2>/dev/null || true
   fi

@@ -128,7 +128,7 @@ flowchart LR
 | `server/service/installer.js` | N | `Installer`：install→start→存活观察→闪退重试→写 store | 180 |
 | `server/service/paths.js` | N | 由 config.js 拆出的 `PATHS` 纯对象（供 store/service 依赖注入，避免循环依赖） | 60 |
 
-### 2.3 Web 控制台（`ui/`）——复制进 `fnos/app/ui/`
+### 2.3 Web 控制台（`ui/`）——打进 `app.tgz` 的 `ui/`
 
 | 文件 | 处置 | 职责 | 预估行 |
 |---|---|---|---|
@@ -147,7 +147,7 @@ flowchart LR
 | `fnos/manifest.in` | N | manifest 模板（占位符 `@VERSION@`/`@CHECKSUM@`/`@PORT@`，打包时替换） | 40 |
 | `fnos/ICON.PNG` | N | 64x64 图标（二进制） | — |
 | `fnos/ICON_256.PNG` | N | 256x256 图标（二进制） | — |
-| `fnos/app/ui/config` | N | 由打包脚本生成的 ui 入口 JSON（`type:url`/`port`/`url:/`） | 20 |
+| `app.tgz` 内 `ui/config` | N | 由打包脚本生成的 ui 入口 JSON（`type:url`/`port`/`url:/`）；`app.tgz` 原样解进 `$TRIM_APPDEST`，故装完即 `$APPDEST/ui/config` | 20 |
 | `fnos/cmd/main` | N | `start|stop|status`：守护启动 Node、写 PID、优雅停、返回码 0/3 | 130 |
 | `fnos/cmd/install_init` | N | 依 `TRIM_*` 建数据目录、chmod、软链，属主 package | 70 |
 | `fnos/cmd/install_callback` | N | 安装后可选：首次部署引导信息落盘 | 30 |
@@ -166,7 +166,9 @@ flowchart LR
 
 | 文件 | 处置 | 职责 | 预估行 |
 |---|---|---|---|
-| `build/pack.sh` | N | 打包主脚本：拷 app → 生成 manifest/ui config → tar.gz → 改名 fpk → sha256 | 130 |
+| `build/pack.sh` | N | 打包主脚本：拷 app → ui config / 版本注入 → **应用负载打成根级 `app.tgz`** → 生成 manifest → tar.gz → 改名 fpk → **包结构校验** → sha256 | 160 |
+| `build/validate-wizard.js` | N | wizard 契约校验（顶层必须是 `[]trimpkg.WizardPage`），打包前跑 | 170 |
+| `build/validate-package.js` | N | 包结构校验（根级必须有 `app.tgz`、根目录不许有 `app/`、内层顶层是 `server/core/ui`），打包后跑 | 210 |
 | `build/gen-manifest.js` | N | 读 `manifest.in` 注入 version/checksum/port → `manifest` | 80 |
 | `build/gen-fnpack.js` | N | 生成 fnDepot V2 `fnpack.json` 片段（releases.packages.x86） | 100 |
 | `.github/workflows/release.yml` | N | tag `v*`/`workflow_dispatch`：装 Node → pack.sh → 上传 artifact + sha256 | 70 |
@@ -535,13 +537,23 @@ function isArmOnly(abis) {
 1. 读版本：`VERSION`（来自 git tag 或 `--version` 参数）。
 2. 清 `build/stage/<appname>/`，`mkdir` fpk 骨架。
 3. 拷 `fnos/manifest.in`、`ICON*.PNG`、`config/`、`cmd/`、`wizard/`。
-4. 拷 `server/` `ui/` `core/` → `stage/<appname>/app/{server,ui,core}`。
-5. 生成 `app/ui/config`（内嵌 `port:8890`、`type:url`、`url:/`）。
+4. 拷 `server/` `ui/` `core/` → `stage/.app/{server,ui,core}`（`app.tgz` 的内容根，独立于 fpk 根）。
+5. 生成 `.app/ui/config`（内嵌 `port:8890`、`type:url`、`url:/`），并把版本号注入 `.app/server/config.js`。
 6. `node build/gen-manifest.js`：注入 `version`、`port`、先算 body checksum（见 7.2）。
 7. 生成图标：`node core/png.js drawAppIcon` 输出 `ui/images/icon_{64,256}.png`。
-8. `tar -czf <appname>_<version>_x86.fpk -C stage <appname>`（注意 `--owner=0 --group=0 --mtime` 固定时间戳以可复现）。
+8. `tar -czf stage/<appname>/app.tgz -C stage/.app server core ui`（**根级 app.tgz，不是 app/ 目录**；显式列成员以免多出 `./` 或外层目录名），再 `tar -czf <appname>_<version>_x86.fpk -C stage <appname>`（`--owner=0 --group=0 --mtime` 固定时间戳以可复现，非 GNU tar 加 `--no-mac-metadata`）。
+8.5. `node build/validate-package.js <fpk>`：校验产物结构，不通过就不许发版。
 9. `sha256sum` 输出 `dist/<appname>_<version>_x86.fpk.sha256`。
 10. `node build/gen-fnpack.js` 产出 `dist/fnpack.snippet.json`。
+
+> **根级 `app.tgz` 是硬要求，不是风格选择**（IMPL 偏差 14）。App Center 直接把
+> `"<pkgdir>/app.tgz"` 丢给解压器，不会遍历目录找代码；给 `app/` 目录时报
+> `failed to decompress app.tgz: … no such file or directory (code 10107)`。
+> 平台对每个包都记一行顶层内容（`grep "app package contents" /var/log/trim_app_center/*.log`），
+> 9 个第三方应用无一例外是 `dirs="[cmd config wizard]" files="[ICON.PNG ICON_256.PNG app.tgz manifest]"`。
+> 解包语义：`app.tgz` 内容**原样**进 `TRIM_APPDEST`（`/volX/@appcenter/<appname>`，
+> `/var/apps/<appname>/target` 是它的软链），不剥前缀不套壳——所以 `app.tgz` 顶层直接是
+> `server/ core/ ui/`，`cmd/main` 里的 `$APPDEST/server/index.js` 才成立。
 
 ### 7.2 manifest `checksum` 生成方式
 
@@ -565,7 +577,7 @@ checksum=@CHECKSUM@
 depend=nodejs
 ```
 
-### 7.4 `app/ui/config`
+### 7.4 `app.tgz` 内的 `ui/config`
 
 ```json
 {".url":{"apkstart-fnos.main":{"title":"ApkStart","icon":"images/icon_64.png","type":"url","protocol":"http","port":"8890","url":"/","allUsers":true}}}

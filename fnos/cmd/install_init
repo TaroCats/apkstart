@@ -6,7 +6,6 @@
 set -u
 
 DATA_ROOT="${TRIM_PKGVAR:-${TRIM_APPDATA:-$HOME/.apkstart}}"
-APPDEST="${TRIM_APPDEST:-}"
 LOG_FILE="${TRIM_TEMP_LOGFILE:-$DATA_ROOT/install.log}"
 
 log() { echo "[install_init] $*" | tee -a "$LOG_FILE" >/dev/null 2>&1 || echo "[install_init] $*"; }
@@ -46,8 +45,12 @@ JSON
 fi
 
 # 可执行位（cmd）
-if [ -n "$APPDEST" ] && [ -d "$APPDEST/../cmd" ]; then
-  chmod 0755 "$APPDEST/../cmd/"* 2>/dev/null || true
+# 用 $0 反推 cmd 目录，不用 "$APPDEST/../cmd"：TRIM_APPDEST 实测是
+# /volX/@appcenter/<appname>（/var/apps/<appname>/target 是它的软链），
+# 其父目录是 @appcenter，里面没有 cmd/ —— 旧写法永远命中不了，chmod 静默跳过。
+CMD_DIR="$(cd "$(dirname "$0")" && pwd)"
+if [ -d "$CMD_DIR" ]; then
+  chmod 0755 "$CMD_DIR"/* 2>/dev/null || true
 fi
 
 log "安装初始化完成"

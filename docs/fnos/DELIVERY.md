@@ -29,8 +29,16 @@
 > `100610`（详见 IMPL 偏差 13）。`0.2.1` 已修复，包内容 checksum 与 `0.2.0` 只差在 wizard
 > 与版本串。`0.2.0` 资产**故意不覆盖**（可能已有用户下载），升级路径是直接装 `0.2.1`。
 >
+> **`0.2.1` 也不要用于 App Center 安装**：它把应用代码放在 fpk 根下的 `app/` 目录，而平台只认
+> **根级 `app.tgz`**，安装时报
+> `failed to decompress app.tgz: … open …/apkstart-fnos-0.2.1-tpk/app.tgz: no such file or directory (code 10107)`
+> （详见 IMPL 偏差 14）。`0.2.2` 已改成根级 `app.tgz`。`0.2.1` 资产同样**故意不覆盖**。
+>
+> **能用的只有 `0.2.2`**：`0.2.0` wizard 坏、`0.2.1` 包结构坏，两者都在 App Center 里装不完；
+> 直接装 `0.2.2` 即可。
+>
 > **版本口径**：本文档「v0.1」指首个 fpk 包 `0.1.0`；「v0.2」指 GPU 改造版 `0.2.0`；
-> `0.2.1` 是修 App Center 安装失败的补丁版（wizard 顶层改数组）。
+> `0.2.1` 是修 wizard 的补丁版（顶层改数组）；`0.2.2` 是修包结构的补丁版（`app/` → `app.tgz`）。
 > 上游 apkstart 自身的 `0.2.7` 是另一条号，与 fpk 版本无关；`server/config.js` 的 `VERSION`
 > 默认值仅在未注入 `APKSTART_VERSION` 时兜底，`pack.sh` 会在计算 checksum 前注入实际版本。
 

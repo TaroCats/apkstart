@@ -744,6 +744,123 @@ test('wizard item 的 field 不进脚本：uninstall_callback 只认 TRIM_UNINST
 });
 
 /* ------------------------------------------------------------------ */
+/* fpk 包结构（0.2.1 真机安装失败的回归护栏）                           */
+/*   App Center 只认根级 app.tgz，不认 app/ 目录；给目录时报：          */
+/*   "failed to decompress app.tgz: … open …/app.tgz:                  */
+/*    no such file or directory (code 10107)"                          */
+/* ------------------------------------------------------------------ */
+
+test('包结构校验器能抓住 0.2.1 的 app/ 目录形态（缺根级 app.tgz）', () => {
+  const { checkListing } = require('../build/validate-package');
+
+  // 0.2.1 的真实形态（真机日志原文）：
+  //   dirs="[app cmd config wizard]" files="[ICON.PNG ICON_256.PNG manifest]"
+  const bad = checkListing(
+    [
+      'apkstart-fnos/',
+      'apkstart-fnos/app/',
+      'apkstart-fnos/app/server/index.js',
+      'apkstart-fnos/cmd/',
+      'apkstart-fnos/cmd/main',
+      'apkstart-fnos/config/',
+      'apkstart-fnos/config/privilege',
+      'apkstart-fnos/wizard/',
+      'apkstart-fnos/wizard/install',
+      'apkstart-fnos/ICON.PNG',
+      'apkstart-fnos/ICON_256.PNG',
+      'apkstart-fnos/manifest',
+    ],
+    null,
+  );
+  assert(bad.length > 0, '0.2.1 形态必须被判失败（否则又会发一个装不上的包）');
+  assert(
+    bad.some((e) => /缺少根级 app\.tgz/.test(e)),
+    '必须指出缺少根级 app.tgz：' + bad.join(' | '),
+  );
+  assert(bad.some((e) => /10107/.test(e)), '错误信息要带上真机错误码 10107，方便对日志');
+  assert(bad.some((e) => /不应出现 app\/ 目录/.test(e)), '必须指出根目录不该有 app/');
+});
+
+test('包结构校验器放行正确形态（根级 app.tgz + 内层 server/core/ui）', () => {
+  const { checkListing } = require('../build/validate-package');
+  const ok = checkListing(
+    [
+      'apkstart-fnos/',
+      'apkstart-fnos/app.tgz',
+      'apkstart-fnos/cmd/',
+      'apkstart-fnos/cmd/main',
+      'apkstart-fnos/config/',
+      'apkstart-fnos/config/privilege',
+      'apkstart-fnos/wizard/',
+      'apkstart-fnos/wizard/install',
+      'apkstart-fnos/ICON.PNG',
+      'apkstart-fnos/ICON_256.PNG',
+      'apkstart-fnos/manifest',
+    ],
+    [
+      'server',
+      'server/index.js',
+      'server/config.js',
+      'core',
+      'core/adb.js',
+      'ui',
+      'ui/config',
+      'ui/index.html',
+    ],
+  );
+  assertEqual(ok.length, 0, '正确形态不该报错：' + ok.join(' | '));
+});
+
+test('包结构校验器能抓住 app.tgz 套壳（顶层多一层 appname 目录）', () => {
+  const { checkListing } = require('../build/validate-package');
+  const rootList = [
+    'apkstart-fnos/app.tgz',
+    'apkstart-fnos/cmd/main',
+    'apkstart-fnos/config/privilege',
+    'apkstart-fnos/wizard/install',
+    'apkstart-fnos/ICON.PNG',
+    'apkstart-fnos/ICON_256.PNG',
+    'apkstart-fnos/manifest',
+  ];
+  const wrapped = checkListing(rootList, ['apkstart-fnos', 'apkstart-fnos/server/index.js']);
+  assert(wrapped.some((e) => /多裹了一层/.test(e)), '套壳必须被指出：' + wrapped.join(' | '));
+
+  const empty = checkListing(rootList, []);
+  assert(empty.some((e) => /空包/.test(e)), '空 app.tgz 必须被指出');
+});
+
+test('pack.sh 走 app.tgz 而不是 app/ 目录，且构建后就地校验包结构', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'build', 'pack.sh'), 'utf8');
+  assert(/app\.tgz/.test(src), 'pack.sh 必须生成根级 app.tgz');
+  assert(!/PKGROOT\/app\//.test(src), 'pack.sh 不应再往 fpk 根塞 app/ 目录');
+  assert(/validate-package\.js/.test(src), 'pack.sh 必须调用包结构校验（否则坏包照样能发出去）');
+});
+
+test('cmd 脚本按 $APPDEST 取路径时，只取 adb 之外的代码根语义', () => {
+  // 这两处是 0.2.1 同期修掉的路径假设：
+  //   ① main 里 adb 在数据根 runtime/ 下，不在代码根
+  //   ② install_init 用 $0 反推 cmd 目录，不用 $APPDEST/../cmd
+  // 只看非注释行，避免注释里提到旧写法就把测试带偏。
+  const fs = require('fs');
+  const path = require('path');
+  const code = (f) => fs
+    .readFileSync(path.join(__dirname, '..', 'fnos', 'cmd', f), 'utf8')
+    .split('\n')
+    .filter((l) => !/^\s*#/.test(l))
+    .join('\n');
+
+  const main = code('main');
+  assert(!/"\$APPDEST\/runtime"/.test(main), 'adb 不该从 $APPDEST/runtime 取（那是代码根）');
+  assert(/"\$DATA_ROOT\/runtime\/platform-tools\/adb"/.test(main), 'adb 应从 $DATA_ROOT/runtime 取');
+
+  const init = code('install_init');
+  assert(!/\$APPDEST\/\.\.\/cmd/.test(init), 'install_init 不该用 $APPDEST/../cmd（父目录里没有 cmd/）');
+  assert(/dirname "\$0"/.test(init), 'install_init 应用 $0 反推 cmd 目录');
+});
+
+/* ------------------------------------------------------------------ */
 (async () => {
   for (const { name, fn } of pending) {
     try {

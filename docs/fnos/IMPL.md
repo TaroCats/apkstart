@@ -74,8 +74,9 @@ disable_authorization_path=true
 
 ### 1.5 构建与 CI
 
-`build/pack.sh`（图标 → stage → **wizard 契约校验** → ui/config → 版本注入 → manifest → tar.gz→fpk → sha256 → fnpack 片段）、`build/gen-icons.js`、`build/gen-manifest.js`、`build/gen-fnpack.js`、`build/validate-wizard.js`、`.github/workflows/release.yml`。
+`build/pack.sh`（图标 → stage → **wizard 契约校验** → ui/config → 版本注入 → **应用负载打成根级 `app.tgz`** → manifest → tar.gz→fpk → **包结构校验** → sha256 → fnpack 片段）、`build/gen-icons.js`、`build/gen-manifest.js`、`build/gen-fnpack.js`、`build/validate-wizard.js`、`build/validate-package.js`、`.github/workflows/release.yml`。
 > `validate-wizard.js` 是 0.2.0「App Center 装不上」事故的护栏（IMPL 偏差 13）：校验的是 **stage 里那份**（真正进包的那份），顶层不是数组就不许打包；同一份逻辑被 `test/fnos-unit.js` 复用，所以 Linux CI job 会红在 PR 上。
+> `validate-package.js` 是 0.2.1「10107 找不到 app.tgz」事故的护栏（IMPL 偏差 14）：校验的是**建好的 .fpk 产物**，不是源码——因为这个 bug 的形态恰好是「本地构建全绿、真机装到一半才炸」，只看源码拦不住。它解出 fpk 与内层 `app.tgz` 的条目，断言根级有 `app.tgz`、根目录没有 `app/`、`app.tgz` 顶层是 `server/ core/ ui/`，并把 0.2.1 的真实日志形态做成了回归用例。
 > `build/` 下仍保留上游 Electron 版遗留脚本（`pack.js`、`prepare-runtime.js`、`render-logo.js` 等），**不参与** fnOS 打包链路，未删除以免破坏上游仓库。旧 Windows/Electron 发布流水线文本存档于 `docs/fnos/legacy-release-electron.yml.txt`。
 
 ---
@@ -561,6 +562,92 @@ topResumedActivity=ActivityRecord{42387ca u0 com.google.android.apps.nexuslaunch
 5. **附带修掉一个连踩两次的发版基建坑**：`actions/checkout` 在 checkout tag 时会执行 `git fetch --no-tags … origin +<sha>:refs/tags/<tag>`，把 tag 引用**强制重置成指向 commit 的轻量引用**，先前 `+refs/tags/*:refs/tags/*` 拉下来的附注 tag 对象被覆盖 → `git tag --format='%(contents:subject)'` 退化成读 commit subject → changelog 变成 commit 首行（v0.2.0、v0.2.1 连续中招）。`fetch-depth: 0` + `fetch-tags: true` **救不了**，因为覆盖发生在 checkout 自己那一步。`release.yml` 的 Resolve 步骤改为 checkout 之后**重新强拉一次 tag**，并用 `git cat-file -t` 断言拿到的是 `tag` 而不是 `commit`，不符就 `::warning::`。
 
 **版本处置**：`0.2.0` 的资产对 App Center 安装是坏的，**不覆盖**已有 Release（有用户可能已下载/做校验），直接发 `0.2.1`。
+
+### 偏差 14 — fpk 根级必须是 `app.tgz`（嵌套压缩包），**不能**是 `app/` 目录（0.2.1 装不上，0.2.2 修复）
+
+**症状（真机原文）**：
+
+```
+ApkStart 安装状态失败 (code 10107):
+failed to decompress app.tgz: failed to open tgz file:
+open /vol2/appcenter-downloads/apkstart-fnos-0.2.1-tpk/app.tgz: no such file or directory
+```
+
+报错非常直白，反而容易看漏：它不是"解压失败"，而是**根本没找到 `app.tgz` 这个文件**。
+我们的 0.2.1 把应用代码放在 fpk 根下的 `app/` 目录里，平台不会去遍历目录找代码。
+
+**这次最难的不是修，而是拿到不会说谎的证据。** 之前一版 IMPL 里写过"`app/` 目录与 `app.tgz`
+两种都被接受"——**这个结论是错的，此处推翻**。真正的取证来自安全模块的逐包记账：
+
+```bash
+grep -h "app package contents" /var/log/trim_app_center/*.log
+```
+
+平台给**每一个**安装/升级过的包都记一行顶层内容：
+
+| 应用 | dirs | files |
+| --- | --- | --- |
+| apphub / speedtest / wechat-on-cloud / nodejs_v22 / nodejs_v24 / tailscale / huitai / softbox / fnmusic-hub | `[cmd config]` `[cmd config i18n]` `[cmd config wizard]` … | `[ICON.PNG ICON_256.PNG **app.tgz** manifest]` |
+| **apkstart-fnos 0.2.1** | `[**app** cmd config wizard]` | `[ICON.PNG ICON_256.PNG manifest]` |
+
+9 个第三方应用**无一例外**都有 `app.tgz`、且都没有 `app` 目录；只有我们这行是反的，
+紧跟着一行 `failed to decompress app.tgz`。这比"看别人的包猜"强得多——它是平台自己说的。
+
+**解包语义（从已装应用反向确认）**：
+
+- `TRIM_APPDEST` = `/volX/@appcenter/<appname>`，`/var/apps/<appname>/target` 是指向它的**软链**。
+- `app.tgz` 的内容**原样解包进 `TRIM_APPDEST`**：不剥前缀、不套壳、不改名。
+  对照 `fnmusic-hub`：`app.tgz` 顶层是 `app/ bin/ config/ ui/`，装完 `$APPDEST/` 下就是
+  `app/ bin/ config/ ui/`（外加 `X.sock`），逐项一一对应。
+- fpk 根下的 `cmd/ config/ wizard/ manifest ICON*` 则落到 `/var/apps/<appname>/`，与 `app.tgz` 互不相干。
+- `ui/` **不生成、只解包**：`$APPDEST/ui/config`（桌面入口）和 `ui/images/icon_{64,256}.png`
+  都在 `app.tgz` 里，平台不替我们造。
+
+**修复**：
+
+1. `build/pack.sh` 第 2 步改成两套目录：`$PKGROOT`（fpk 根）与 `$APPSTAGE`（`app.tgz` 内容根，
+   `$STAGE/.app`，以 `.` 开头永不进包）。应用代码进 `$APPSTAGE`，不再进 `$PKGROOT/app`。
+2. 新增第 3.8 步：`tar -czf "$PKGROOT/app.tgz" -C "$APPSTAGE" server core ui`——**显式列成员**，
+   这样 tar 顶层就是 `server/ core/ ui/`，不会多出 `./` 或外层目录名。
+   `ui/config` 写入与 `config.js` 版本注入都前移到这里之前，保证打进 `app.tgz`。
+3. `manifest` 的 `checksum` 把 `app.tgz` 当**一个文件**算（不会解开算），生成顺序不变。
+4. 新增 `build/validate-package.js`：解出 fpk 与其中的 `app.tgz` 条目，校验
+   ① 根级有 `app.tgz` 且是普通文件；② 根目录**不许**有 `app/`；③ 根级骨架
+   （`cmd/ config/ wizard/ manifest ICON.PNG ICON_256.PNG`）；④ `app.tgz` 非空、顶层是
+   `server/ core/ ui/`、且含 `server/index.js`、`ui/config`、`ui/index.html`；⑤ 反套壳（顶层只有
+   `apkstart-fnos/` 一律报错）。fpk 那层公共前缀 `apkstart-fnos/` 会先被剥掉，再按"包根"判断。
+5. `build/pack.sh` 第 5.5 步在**建完 fpk 之后**立刻校验——0.2.1 的问题正是"本地构建全绿、
+   只有真机装到一半才炸"，所以护栏必须卡在产物上，而不是卡在源码上。
+6. 单测新增 5 例（67 → 72）：能吃住 0.2.1 形态、放行正确形态、抓套壳与空包、
+   `pack.sh` 不再往包根塞 `app/` 且必须调校验、`cmd/*` 路径假设（见下）。
+
+**同时修掉两处被这个 bug 掩盖的路径假设错误**（都是 `set -u` + `|| true` 兜住、静默假成功的类型）：
+
+| 位置 | 旧写法 | 问题 | 新写法 |
+| --- | --- | --- | --- |
+| `cmd/main` `do_stop` | `ADB_BIN="$APPDEST/runtime/platform-tools/adb"` | adb 在**数据根** `runtime/` 下，不在代码根；`-x` 永远失败，`adb emu kill` 从未执行过，全靠后面的 `pkill` 兜底 | `ADB_BIN="$DATA_ROOT/runtime/platform-tools/adb"` |
+| `cmd/install_init` | `chmod 0755 "$APPDEST/../cmd/"*` | `$APPDEST` 的父目录是 `@appcenter`，里面没有 `cmd/`；条件恒假，chmod 从未生效 | `CMD_DIR="$(cd "$(dirname "$0")" && pwd)"`（与 `upgrade_init` 同款写法，不依赖变量语义） |
+
+**真机等价验证（不需要 OAuth，也不需要真装一遍）**：在目标机上按 App Center 的语义解包到临时
+APPDEST，再用真是 node 直接拉服务——
+
+```
+$APPDEST 内容: core server ui
+入口: server/index.js(5903B) ui/config(152B) ui/index.html(6581B)  ← cmd/main 期望的路径都在
+TRIM_APPDEST=/tmp/apkverify/appdest TRIM_PKGVAR=/tmp/apkverify/var TRIM_SERVICE_PORT=28890 \
+  /var/apps/nodejs_v22/target/bin/node .../server/index.js
+→ 200 {"app":"apkstart-fnos","status":"ok","version":"0.2.2","pid":4132607,"node":"v22.23.4"}
+```
+
+版本报 `0.2.2`（构建期注入生效）、数据根落在 `TRIM_PKGVAR`（不是代码根）、SIGTERM 优雅退出
+——新布局下的三条路径假设一次跑通。
+
+**附带**：macOS 的 bsdtar 会把 Apple 扩展属性写成 PAX 头
+（`LIBARCHIVE.xattr.com.apple.provenance`），fnOS 侧 GNU tar 解包时逐文件打印
+"忽略未知的扩展头关键字"。无害但噪声大，也让本地包与 CI 包字节不一致；`pack.sh` 在非 GNU tar
+分支加上 `--no-mac-metadata`。
+
+**版本处置**：`0.2.0`（wizard 坏）、`0.2.1`（包结构坏）两个资产都**不覆盖**，发 `0.2.2`。
 
 ### 附：已按真机实测校正的参数（非偏差，属对齐）
 

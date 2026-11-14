@@ -70,7 +70,7 @@
 ### P0（必须）
 
 **P0-1 fpk 交付骨架**
-产出 `manifest`、`ICON.PNG`(64) / `ICON_256.PNG`(256)、`app/`（含 `app/ui/{config,images/icon_64.png,icon_256.png}`）、`cmd/` 共 **9 个**脚本（`main` + `install_init`/`install_callback`/`uninstall_init`/`uninstall_callback`/`upgrade_init`/`upgrade_callback`/`config_init`/`config_callback`，可执行位 +x）、`config/privilege`（`run-as: package`）、`config/resource`；最终产物名 `<appname>_<version>_x86.fpk`。
+产出 `manifest`、`ICON.PNG`(64) / `ICON_256.PNG`(256)、**根级 `app.tgz`**（内含 `server/`、`core/`、`ui/{config,images/icon_64.png,icon_256.png}`，原样解包进 `$TRIM_APPDEST`；App Center 只认这个嵌套压缩包，放 `app/` 目录会报 10107，见 IMPL 偏差 14）、`cmd/` 共 **9 个**脚本（`main` + `install_init`/`install_callback`/`uninstall_init`/`uninstall_callback`/`upgrade_init`/`upgrade_callback`/`config_init`/`config_callback`，可执行位 +x）、`config/privilege`（`run-as: package`）、`config/resource`；最终产物名 `<appname>_<version>_x86.fpk`。
 - 验收：`tar -tzf` 能列出上述全部条目；`cmd/*` 9 个脚本权限均为 0755；`manifest` 含 `appname/version/display_name/desc/platform/os_min_version(≥1.2.0)/maintainer/checksum`，其中 `platform` 取 fnOS **平台词表** `x86`（同 `arm` / `all`，不是内核架构 `x86_64`）；`ui/config` 中入口 `type: "url"`、`protocol: "http"`、`url: "/"`、`port` 为约定值（§4）。
 
 **P0-2 APK 上传与解析**
@@ -110,7 +110,7 @@ Web 端支持选择或拖拽上传 `.apk`（单文件 ≤ 500 MB），服务端�
 - 验收：在 `10.31.0.4` 上 `bash cmd/main start` 后 `curl http://127.0.0.1:<port>/api/health` 返回 200；`cmd/main status; echo $?` 为 0；`stop` 后为 3；重复 start 不产生多进程；`install_init` 后 `$TRIM_APPDATA` 下目录结构存在且属主为 package 用户。
 
 **P0-11 GitHub Actions 自动打包**
-`push tag v*` / `workflow_dispatch` 触发：装 Node → 拷贝 `app/` → 生成 `manifest`（注入版本号与 checksum）→ `tar.gz` → 改名 `.fpk` → 上传 artifact + 计算 sha256。
+`push tag v*` / `workflow_dispatch` 触发：装 Node → 组装 fpk 根与 `app.tgz` 内容根 → 生成 `manifest`（注入版本号与 checksum）→ 应用负载打成根级 `app.tgz` → `tar.gz` → 改名 `.fpk` → **包结构校验** → 上传 artifact + 计算 sha256。
 - 验收：在 fork 上打 tag，Actions 绿；下载 artifact 得到 `<appname>_<version>_x86.fpk`，`tar -tzf` 通过，sha256 与 workflow 输出一致；同一 tag 重跑产物 sha256 稳定（打包可复现的元数据已固定）。
 
 **P0-12 fnDepot 索引生成**
@@ -168,7 +168,7 @@ Web 端支持选择或拖拽上传 `.apk`（单文件 ≤ 500 MB），服务端�
 | 变量 | 用途 | 关键子路径 |
 |---|---|---|
 | `TRIM_PKGVAR` | **唯一持久数据根（首选）** | `runtime/`、`avd/`、`apps.json`、`settings.json`、`shared/`、`logs/` |
-| `TRIM_APPDEST` | 安装后代码根（原 `app/`） | 服务入口、`ui/` |
+| `TRIM_APPDEST` | 安装后代码根 = `app.tgz` 解包目的地（`/volX/@appcenter/<appname>`） | 服务入口、`ui/` |
 | `TRIM_TEMP_LOGFILE` | 日志文件绝对路径 | 服务日志、生命周期脚本日志 |
 | `TRIM_PKGTMP` | 可丢弃：下载缓存与上传暂存 | `downloads/`、`uploads/` |
 | `TRIM_PKGHOME` | 进程 HOME；作为 `ANDROID_AVD_HOME` / `ANDROID_SDK_HOME` 基址 | `avd/` |
