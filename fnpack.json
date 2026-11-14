@@ -29,7 +29,7 @@
       "service_port": "8890",
       "releases": {
         "0.2.0": {
-          "changelog": "fix(build): 修发版工具链三处会毁掉已上架版本的缺陷",
+          "changelog": "GPU 加速可选化：默认 gpu=auto，探测到硬件 3D X display 与 render node 时启用 -gpu host（开机中位 23843ms → 20979ms，-12.0%）；包用户自动加入 render/video 组以读写 renderD128/card0；X server 不随包携带（GPL-2.0），改由运维投放到 $TRIM_PKGVAR/runtime/xserver/",
           "updated_at": "2026-11-14T04:37:35Z",
           "packages": {
             "x86": {

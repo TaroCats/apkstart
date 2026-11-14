@@ -66,10 +66,19 @@ function buildXserverArgs(o = {}) {
   return args;
 }
 
+/**
+ * 本模块解析的全是 **POSIX 路径**（X11 的 `/tmp/.X11-unix`、`/usr/share/X11/xkb`、
+ * 包内 `…/usr/bin/Xkasmvnc`），产品也只在 Linux 上跑。所以一律用 `path.posix`
+ * 而不是 `path`：否则在 Windows 上跑单测时 `path.join('/opt/app','share','X11','xkb')`
+ * 会变成 `\opt\app\share\X11\xkb`、`path.join('/usr/bin')` 会带出盘符 `D:\usr\bin`，
+ * 断言全挂（CI 就是 Windows runner）。
+ */
+const P = path.posix;
+
 /** 由可执行文件路径推断安装前缀（`…/usr/bin/Xkasmvnc` → `…/usr`）。 */
 function prefixOf(bin) {
-  const dir = path.dirname(bin);
-  return path.basename(dir) === 'bin' ? path.dirname(dir) : dir;
+  const dir = P.dirname(bin);
+  return P.basename(dir) === 'bin' ? P.dirname(dir) : dir;
 }
 
 /**
@@ -80,7 +89,7 @@ function prefixOf(bin) {
  */
 function pickXkbDir(bin, exists = fs.existsSync) {
   const cands = [
-    path.join(prefixOf(bin), 'share', 'X11', 'xkb'),
+    P.join(prefixOf(bin), 'share', 'X11', 'xkb'),
     '/usr/share/X11/xkb',
     '/usr/local/share/X11/xkb',
   ];
@@ -102,10 +111,10 @@ function pickXkbDir(bin, exists = fs.existsSync) {
  * @returns {string} 找不到返回空串（用默认 cwd）
  */
 function pickXkbBinCwd(bin, exists = fs.existsSync) {
-  let dir = path.dirname(bin);
+  let dir = P.dirname(bin);
   for (let i = 0; i < 4; i += 1) {
-    if (exists(path.join(dir, '.xkbbin', 'xkbcomp'))) return dir;
-    const up = path.dirname(dir);
+    if (exists(P.join(dir, '.xkbbin', 'xkbcomp'))) return dir;
+    const up = P.dirname(dir);
     if (up === dir) break;
     dir = up;
   }
@@ -114,10 +123,12 @@ function pickXkbBinCwd(bin, exists = fs.existsSync) {
 
 /** 找 xkbcomp 可执行文件（软链目标）。找不到返回空串。 */
 function findXkbcompBin(bin, exists = fs.existsSync) {
-  const cands = [path.join(prefixOf(bin), 'bin', 'xkbcomp'), '/usr/bin/xkbcomp'];
+  const cands = [P.join(prefixOf(bin), 'bin', 'xkbcomp'), '/usr/bin/xkbcomp'];
   for (const c of cands) if (exists(c)) return c;
-  for (const d of String(process.env.PATH || '').split(':')) {
-    if (d && exists(path.join(d, 'xkbcomp'))) return path.join(d, 'xkbcomp');
+  // PATH 分隔符用 path.delimiter（Linux ':'，Windows ';'）：产品只在 Linux 跑，
+  // 但单测在 Windows 上也要能扫到，硬编码 ':' 会把整条 PATH 当成一个目录。
+  for (const d of String(process.env.PATH || '').split(path.delimiter)) {
+    if (d && exists(P.join(d, 'xkbcomp'))) return P.join(d, 'xkbcomp');
   }
   return '';
 }
@@ -141,16 +152,18 @@ function ensureXkbRoot(bin, workRoot, exists = fs.existsSync) {
   if (direct) return direct;
   const xkbcomp = findXkbcompBin(bin, exists);
   if (!xkbcomp || !workRoot) return '';
-  const root = path.join(workRoot, 'xkbroot');
-  const dir = path.join(root, '.xkbbin');
-  const link = path.join(dir, 'xkbcomp');
+  const root = P.join(workRoot, 'xkbroot');
+  const dir = P.join(root, '.xkbbin');
+  const link = P.join(dir, 'xkbcomp');
   try {
     fs.mkdirSync(dir, { recursive: true });
     let same = false;
     try { same = fs.readlinkSync(link) === xkbcomp; } catch (_) { same = false; }
     if (!same) {
       try { fs.unlinkSync(link); } catch (_) { /* 不存在，忽略 */ }
-      fs.symlinkSync(xkbcomp, link);
+      // 显式 type='file'：POSIX 忽略该参数，但 Windows 上目标不存在时若不指定
+      // 类型，Node 无法推断会直接失败（单测在 Windows runner 上跑）。
+      fs.symlinkSync(xkbcomp, link, 'file');
     }
     return root;
   } catch (e) {
@@ -193,9 +206,10 @@ function supportsHw3d(bin) {
 }
 
 /** X11 unix socket 路径（`/tmp/.X11-unix/X9`）。 */
-function socketPathFor(display) {
+/** X server 的 unix socket 路径（`:9` → `/tmp/.X11-unix/X9`）；非法 display 返回 null。 */
+function socketPathFor(display, tmpDir = '/tmp') {
   const n = parseDisplayNum(display);
-  return Number.isNaN(n) ? null : `/tmp/.X11-unix/X${n}`;
+  return Number.isNaN(n) ? null : `${tmpDir}/.X11-unix/X${n}`;
 }
 
 /** 读进程命令行（读不到返回空串）。 */
@@ -224,10 +238,13 @@ function readProcCmdline(pid) {
  */
 function cleanStaleDisplay(display, deps = {}) {
   const exists = deps.exists || fs.existsSync;
+  // lock/socket 根目录可注入：生产永远是 /tmp（X 的约定），单测里换成 os.tmpdir()
+  // 才能在非 Linux 上真实落盘（Windows runner 没有 D:\tmp）。
+  const tmpDir = deps.tmpDir || '/tmp';
   const n = parseDisplayNum(display);
   if (Number.isNaN(n)) return 'absent';
-  const lock = `/tmp/.X${n}-lock`;
-  const sock = socketPathFor(display);
+  const lock = `${tmpDir}/.X${n}-lock`;
+  const sock = socketPathFor(display, tmpDir);
 
   let pid = NaN;
   if (exists(lock)) {

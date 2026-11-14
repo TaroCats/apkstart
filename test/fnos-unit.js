@@ -579,7 +579,10 @@ test('只有裸二进制时造 .xkbbin/xkbcomp 软链 shim（否则 -xkbdir 也�
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'xkbshim-'));
   const bin = '/nonexistent/usr/bin/Xkasmvnc';
   const root = ensureXkbRoot(bin, tmp, (p) => p === '/usr/bin/xkbcomp');
-  assertEqual(root, path.join(tmp, 'xkbroot'), '返回可直接当 cwd 的目录');
+  // 实现内部用 path.posix 拼（这些是 Linux 路径），所以期望值也要 posix：
+  // Windows 上 tmp 是 `C:\...\xkbshim-x`，posix.join 得到 `C:\...\xkbshim-x/xkbroot`。
+  const expectedRoot = path.posix.join(tmp, 'xkbroot');
+  assertEqual(root, expectedRoot, '返回可直接当 cwd 的目录');
   // 目标在 macOS 上不存在，属悬空软链，只能 lstat（existsSync 对悬空链接返回 false）
   assert(fs.lstatSync(path.join(root, '.xkbbin', 'xkbcomp')).isSymbolicLink(), '软链必须落在 <cwd>/.xkbbin/xkbcomp');
   assertEqual(fs.readlinkSync(path.join(root, '.xkbbin', 'xkbcomp')), '/usr/bin/xkbcomp');
@@ -592,25 +595,35 @@ test('只有裸二进制时造 .xkbbin/xkbcomp 软链 shim（否则 -xkbdir 也�
 
 test('cleanStaleDisplay 把死掉的 lock 当垃圾清掉（否则一次异常退出就永久 Cannot establish any listening sockets）', () => {
   const fs = require('fs');
+  const os = require('os');
+  const path = require('path');
   const n = 9700 + (process.pid % 100); // 避开真机真实槽位
-  const lock = `/tmp/.X${n}-lock`;
+  // 生产里 lock 固定在 /tmp，但 Windows runner 没有 D:\tmp，用可注入的 tmpDir 换到
+  // os.tmpdir() 才能真实落盘；被测逻辑（读 pid → 判活 → 删 lock/socket）完全一致。
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'xlock-'));
+  const lock = path.join(tmpDir, `.X${n}-lock`);
   // 用一个必然不存在的 pid 模拟「X 被 SIGKILL 后留下的 lock」
   fs.writeFileSync(lock, '999999\n');
-  assertEqual(cleanStaleDisplay(`:${n}`), 'cleaned', 'pid 不存在 → 清掉');
+  assertEqual(cleanStaleDisplay(`:${n}`, { tmpDir }), 'cleaned', 'pid 不存在 → 清掉');
   assert(!fs.existsSync(lock), 'lock 已删除');
   // 没 lock 没 socket → absent（不谎报 cleaned）
-  assertEqual(cleanStaleDisplay(`:${n}`), 'absent');
+  assertEqual(cleanStaleDisplay(`:${n}`, { tmpDir }), 'absent');
+  fs.rmSync(tmpDir, { recursive: true, force: true });
 });
 
 test('cleanStaleDisplay 不因 pid 复用永久占住槽位（pid 活着但不是 X server → 仍清理）', () => {
   const fs = require('fs');
+  const os = require('os');
+  const path = require('path');
   // 判定依赖 /proc/<pid>/cmdline，仅 Linux 有意义（真机 fnOS 就是 Linux）。
   if (!fs.existsSync('/proc/self/cmdline')) return;
   const n = 9800 + (process.pid % 100);
-  const lock = `/tmp/.X${n}-lock`;
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'xlock-'));
+  const lock = path.join(tmpDir, `.X${n}-lock`);
   fs.writeFileSync(lock, `${process.pid}\n`); // 我们自己活着，但命令行不是 X
-  assertEqual(cleanStaleDisplay(`:${n}`), 'cleaned');
+  assertEqual(cleanStaleDisplay(`:${n}`, { tmpDir }), 'cleaned');
   assert(!fs.existsSync(lock));
+  fs.rmSync(tmpDir, { recursive: true, force: true });
 });
 
 /* ------------------------------------------------------------------ */

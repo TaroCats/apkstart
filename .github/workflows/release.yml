@@ -25,6 +25,13 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          # 必须把附注 tag 对象也拉下来：默认 fetch-depth=1 又不取 tag，注入的
+          # refs/tags/vX 只是个指向 commit 的轻量引用，`git tag -l
+          # --format='%(contents:subject)'` 会退化成读 **commit subject**，
+          # changelog 直接变成 commit 首行（v0.2.0 实际踩到，写进了 fnpack.json）。
+          fetch-depth: 0
+          fetch-tags: true
 
       - name: Setup Node.js 22
         uses: actions/setup-node@v4

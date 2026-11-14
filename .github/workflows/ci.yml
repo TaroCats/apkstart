@@ -40,3 +40,52 @@ jobs:
           $out = & .\test\pointer-hook-logic.ps1
           $out | ForEach-Object { Write-Host $_ }
           if (-not ($out -contains 'POINTER_HOOK_LOGIC_OK')) { exit 1 }
+
+  # 交付物（fnOS fpk）只在 Linux 上跑，Windows job 只能覆盖跨平台那部分。
+  # service/xserver.js 与 service/gpu.js 涉及 /tmp/.X*-lock、/proc/<pid>/cmdline、
+  # renderD128 这些只有 Linux 才有的东西，必须有 Linux 上的真实执行。
+  test-linux:
+    name: 单元测试（Linux / Node 22）
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: 安装依赖
+        run: npm ci
+        env:
+          ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+
+      - name: 运行测试
+        run: npm test
+
+      # 打包链路自身的回归：manifest/checksum/fnpack 三者必须自洽，
+      # 且 fnpack.json 的历史 releases 不能被新版本冲掉。
+      - name: 打包冒烟（manifest checksum 自洽 + fnpack 保留历史）
+        run: |
+          bash build/pack.sh --version 0.0.0-smoke --changelog "CI 冒烟"
+          node -e '
+            const { computeChecksum } = require("./build/gen-manifest.js");
+            const fs = require("fs");
+            const dir = "build/stage/apkstart-fnos";
+            const declared = /^checksum=(.+)$/m.exec(fs.readFileSync(dir + "/manifest", "utf8"))[1];
+            const actual = computeChecksum(dir);
+            if (declared !== actual) {
+              console.error(`checksum 不一致: 声明 ${declared} / 实际 ${actual}`);
+              process.exit(1);
+            }
+            const snip = JSON.parse(fs.readFileSync("dist/fnpack.snippet.json", "utf8"));
+            const rel = snip.apps["apkstart-fnos"].releases;
+            if (!rel["0.0.0-smoke"]) { console.error("缺少本次版本"); process.exit(1); }
+            const hist = Object.keys(rel).filter((v) => v !== "0.0.0-smoke");
+            if (!hist.length) {
+              console.error("历史 releases 被覆盖了（应保留仓库根 fnpack.json 里的已有版本）");
+              process.exit(1);
+            }
+            console.log(`checksum OK，releases = ${Object.keys(rel).join(", ")}`);
+          '
