@@ -28,6 +28,17 @@
       "is_docker": false,
       "service_port": "8890",
       "releases": {
+        "0.2.1": {
+          "changelog": "fix(fpk): wizard 改为顶层数组，修 App Center 安装报 wizard invalid",
+          "updated_at": "2026-11-14T05:34:18Z",
+          "packages": {
+            "x86": {
+              "download_url": "https://github.com/TaroCats/apkstart/releases/download/v0.2.1/apkstart-fnos_0.2.1_x86.fpk",
+              "sha256": "d2219092bc5c80cd8a4b38a5cccc35b73d7b2591919f982dc2711644fe076ae3",
+              "size": 99933
+            }
+          }
+        },
         "0.2.0": {
           "changelog": "GPU 加速可选化：默认 gpu=auto，探测到硬件 3D X display 与 render node 时启用 -gpu host（开机中位 23843ms → 20979ms，-12.0%）；包用户自动加入 render/video 组以读写 renderD128/card0；X server 不随包携带（GPL-2.0），改由运维投放到 $TRIM_PKGVAR/runtime/xserver/",
           "updated_at": "2026-11-14T04:37:35Z",
