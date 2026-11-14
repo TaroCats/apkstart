@@ -28,6 +28,17 @@
       "is_docker": false,
       "service_port": "18990",
       "releases": {
+        "0.2.5": {
+          "changelog": "0.2.5：修「只有画面不能操作」——<img> 原生拖拽打断手势、点击容差用错单位；长按改发原地按住；输入后立即补帧",
+          "updated_at": "2026-11-14T08:32:29Z",
+          "packages": {
+            "x86": {
+              "download_url": "https://github.com/TaroCats/apkstart/releases/download/v0.2.5/apkstart-fnos_0.2.5_x86.fpk",
+              "sha256": "283f0ad4327d0a244815f3e06acb662236cdfdf1a28db6be26812790acfccd64",
+              "size": 107688
+            }
+          }
+        },
         "0.2.4": {
           "changelog": "0.2.4 — 修「装了也起不来」的三个链式真因，GPU 加速真机跑通",
           "updated_at": "2026-11-14T07:28:28Z",
