@@ -16,14 +16,21 @@
 
 | 版本 | 产物 | 大小 | sha256 | 发布时间 |
 |---|---|---|---|---|
+| `0.2.1` | `apkstart-fnos_0.2.1_x86.fpk` | 99,933 B | `d2219092bc5c80cd8a4b38a5cccc35b73d7b2591919f982dc2711644fe076ae3` | 2026-11-14T05:34Z |
 | `0.2.0` | `apkstart-fnos_0.2.0_x86.fpk` | 99,027 B | `ec0f9581d8e5fec2e5393192cad76cf59a51af4c0d753316ea837c1ef37723af` | 2026-11-14T04:37Z |
 | `0.1.0` | `apkstart-fnos_0.1.0_x86.fpk` | 90,722 B | `cee439f852e7e95851c8c75475304fa585897c43a3c72617e88a2febc791f21c` | 2026-11-13T20:16Z |
 
-> 两条 release 同时保留在仓库根 `fnpack.json` 里（`gen-fnpack.js` 是**增量合并**，不是覆盖），
-> `0.1.0` 可随时回滚下载。`0.2.0` 的体积差异来自 GPU 改造新增的
+> 三条 release 同时保留在仓库根 `fnpack.json` 里（`gen-fnpack.js` 是**增量合并**，不是覆盖），
+> `0.1.0` / `0.2.0` 可随时回滚下载。`0.2.0` 的体积差异来自 GPU 改造新增的
 > `service/xserver.js` + `service/gpu.js` 与 `render`/`video` 组声明。
 >
-> **版本口径**：本文档「v0.1」指首个 fpk 包 `0.1.0`；「v0.2」指 GPU 改造版 `0.2.0`。
+> **`0.2.0` 不要用于 App Center 安装**：它的 `wizard/install`、`wizard/uninstall` 顶层是对象，
+> fnOS 侧类型是 `[]trimpkg.WizardPage`，会报 `wizard invalid: json: cannot unmarshal object …` /
+> `100610`（详见 IMPL 偏差 13）。`0.2.1` 已修复，包内容 checksum 与 `0.2.0` 只差在 wizard
+> 与版本串。`0.2.0` 资产**故意不覆盖**（可能已有用户下载），升级路径是直接装 `0.2.1`。
+>
+> **版本口径**：本文档「v0.1」指首个 fpk 包 `0.1.0`；「v0.2」指 GPU 改造版 `0.2.0`；
+> `0.2.1` 是修 App Center 安装失败的补丁版（wizard 顶层改数组）。
 > 上游 apkstart 自身的 `0.2.7` 是另一条号，与 fpk 版本无关；`server/config.js` 的 `VERSION`
 > 默认值仅在未注入 `APKSTART_VERSION` 时兜底，`pack.sh` 会在计算 checksum 前注入实际版本。
 
