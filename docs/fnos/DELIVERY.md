@@ -4,7 +4,7 @@
 |---|---|
 | 上游仓库 | https://github.com/TaroCats/apkstart |
 | 目标平台 | 飞牛 fnOS（x86，KVM） |
-| **当前可交付版本** | **`0.2.4`**（见下方发布表首行；本表其余数值是 `0.1.0` 首次交付的基线快照，保留用于对照） |
+| **当前可交付版本** | **`0.2.5`**（见下方发布表首行；本表其余数值是 `0.1.0` 首次交付的基线快照，保留用于对照） |
 | 产物 | `dist/apkstart-fnos_0.1.0_x86.fpk` |
 | 大小 | 90,722 B |
 | sha256 | `cee439f852e7e95851c8c75475304fa585897c43a3c72617e88a2febc791f21c` |
@@ -17,6 +17,7 @@
 
 | 版本 | 产物 | 大小 | sha256 | 发布时间 |
 |---|---|---|---|---|
+| `0.2.5` | `apkstart-fnos_0.2.5_x86.fpk` | 107,688 B | `283f0ad4327d0a244815f3e06acb662236cdfdf1a28db6be26812790acfccd64` | 2026-11-14T08:32Z |
 | `0.2.4` | `apkstart-fnos_0.2.4_x86.fpk` | 105,445 B | `c7a010da3752d5652ea51a5ae72fd88dcdec5b0eae89a62b34586131e0ed84b8` | 2026-11-14T07:28Z |
 | `0.2.3` | `apkstart-fnos_0.2.3_x86.fpk` | 102,180 B | `4a3df53b9f000b701cdc6571a61d2b7a87c1d8cca4e7c77b8462b57b755d8166` | 2026-11-14T06:37Z |
 | `0.2.2` | `apkstart-fnos_0.2.2_x86.fpk` | 100,452 B | `8b9a7f318bde97c8e085c1e9c709d237bbf75bdd37b55bed5f0018ee2b943e2a` | 2026-11-14T05:55Z |
@@ -24,10 +25,16 @@
 | `0.2.0` | `apkstart-fnos_0.2.0_x86.fpk` | 99,027 B | `ec0f9581d8e5fec2e5393192cad76cf59a51af4c0d753316ea837c1ef37723af` | 2026-11-14T04:37Z |
 | `0.1.0` | `apkstart-fnos_0.1.0_x86.fpk` | 90,722 B | `cee439f852e7e95851c8c75475304fa585897c43a3c72617e88a2febc791f21c` | 2026-11-13T20:16Z |
 
-> 六条 release 同时保留在仓库根 `fnpack.json` 里（`gen-fnpack.js` 是**增量合并**，不是覆盖），
-> `0.1.0` / `0.2.0` / `0.2.1` / `0.2.2` / `0.2.3` 可随时回滚下载（只有 `0.2.4` 既装得上、起得来、
-> 模拟器又能真正开机）。
+> 七条 release 同时保留在仓库根 `fnpack.json` 里（`gen-fnpack.js` 是**增量合并**，不是覆盖），
+> `0.1.0` / `0.2.0` / `0.2.1` / `0.2.2` / `0.2.3` 可随时回滚下载（只有 `0.2.4` / `0.2.5` 既装得上、
+> 起得来、模拟器又能真正开机并且**画面可操作**）。
 > `0.2.2` 的体积比 `0.2.1` 多 519 B，来源是新增的根级 `app.tgz` 头部与 `cmd/` 两处修正，不是功能增量。
+>
+> `0.2.5` 同样验过 CI 产物：下载 Release 资产 → `shasum -a 256` = `283f0ad4…`，与 GitHub asset
+> digest 逐字一致 → `node build/validate-package.js` → `包结构校验通过: 根 21 条目 / app.tgz 43 条目`
+> → 解出 `manifest` 确认 `version=0.2.5`、`ui/config` 确认 `"port":"18990"` → 从 `app.tgz` 里取出的
+> `ui/screen.js` / `ui/style.css` / `server/api/screen.js` 与仓库工作区**sha256 逐字一致**
+> （`5050fd75…` / `6c4c469e…` / `eec8b0e3…`）。`fnpack.json` 由 CI 自动同步（`2bfbe55`）。
 >
 > `0.2.4` 同样验过 CI 产物：下载 Release 资产 → `shasum -a 256` 与 GitHub asset digest 逐字一致
 > （`c7a010da…`）→ `node build/validate-package.js` → `包结构校验通过: 根 21 条目 / app.tgz 43 条目`
@@ -60,15 +67,18 @@
 > **`0.2.2` 能装，但可能起不来**：它把默认端口写死 8890，而目标机的 8890 被 Docker 里的
 > uvicorn 长期占用（`uvicorn app.main:app --port 8890`），服务 bind 不上、进程秒退（IMPL 偏差 15）。
 >
-> **能装且能起来的只有 `0.2.4`**：`0.2.0` wizard 坏、`0.2.1` 包结构坏、`0.2.2` 端口撞车、
-> `0.2.3` 装得上也能起服务但**模拟器开不起来**（同 AVD 遗留占用 / adb HOME 不可写 / emulator
-> 继承了不可读的 cwd，三条叠在一起，见 IMPL 偏差 16）。直接装 `0.2.4` 即可——它同时带 0.2.3
-> 的端口修正（默认 18990，跟随 `ui/config`，撞了会在启动前说清是谁占的）。
+> **能装、能起来、且画面能操作的只有 `0.2.5`**：`0.2.0` wizard 坏、`0.2.1` 包结构坏、
+> `0.2.2` 端口撞车、`0.2.3` 装得上也能起服务但**模拟器开不起来**（同 AVD 遗留占用 / adb HOME
+> 不可写 / emulator 继承了不可读的 cwd，见 IMPL 偏差 16）、`0.2.4` 起得来但**画面只能看不能操作**
+> （`<img>` 原生拖拽打断手势 + 点击容差用错单位，见偏差 17）。直接装 `0.2.5` 即可——它是
+> 0.2.3 端口修正 + 0.2.4 启动链修复 + 0.2.5 输入修复的合集。
 >
 > **版本口径**：本文档「v0.1」指首个 fpk 包 `0.1.0`；「v0.2」指 GPU 改造版 `0.2.0`；
 > `0.2.1` 是修 wizard 的补丁版（顶层改数组）；`0.2.2` 是修包结构的补丁版（`app/` → `app.tgz`）；
 > `0.2.3` 是修端口冲突的补丁版（默认 8890 → 18990，端口以 `ui/config` 为单一真源）；
-> `0.2.4` 是修模拟器启动链的补丁版（AVD 回收 + adb HOME + emulator cwd，GPU 加速真机跑通）。
+> `0.2.4` 是修模拟器启动链的补丁版（AVD 回收 + adb HOME + emulator cwd，GPU 加速真机跑通）；
+> `0.2.5` 是修「画面不能操作」的补丁版（`<img>` 关掉原生拖拽 + 手势判定改用 CSS 像素 + 长按
+> 走原地按住 + 输入后立即补帧）。
 > 上游 apkstart 自身的 `0.2.7` 是另一条号，与 fpk 版本无关；`server/config.js` 的 `VERSION`
 > 默认值仅在未注入 `APKSTART_VERSION` 时兜底，`pack.sh` 会在计算 checksum 前注入实际版本。
 
@@ -259,7 +269,7 @@ qemu 进程 `Uid: 926`（即包用户 `apkstart-fnos`），日志含 `Selecting 
 
 用 `setsid … &` 把模拟器丢后台再测，包用户下**必崩**；同一条命令前台跑、或由 Node `spawn()` 拉起则**正常**。初版「包用户下 `-gpu host` 必崩」的结论就是这个测试形态造成的假象，白花了大量时间在权限上。**结论：验收必须走产品真实启动路径，手工命令行只能用于单点排查。**
 
-### 目标机当前状态（0.2.4 验证后）
+### 目标机当前状态（0.2.5 验证后）
 
 `settings.json` 的 `emulator.gpu` = `auto`、`xserverPath` = `""`；包用户组 `920(apkstart-fnos),44(video),105(render),992(all.editor)`；`$TRIM_PKGVAR/runtime/xserver/Xkasmvnc` 已投放（运维侧动作，非包内文件）；`/tmp/.X9-lock` 与 `:9` socket 在 `stop()` 后不再残留（只剩宿主自己的 `X99`）；无残留 qemu / X server 进程；我此前手工调试留下的 root adb server（`5037`）与 `/tmp` 下的测试部署已清理。
 
@@ -288,6 +298,41 @@ emulator 日志: vulkan_mode_selected:host gles_mode_selected:host
 `<AVD>/config.ini` 的 `hw.gpu.mode` 改成 `host`，否则 emulator 按 AVD 里的 `off` 退回 lavapipe，
 会跑出「host 其实能用」的假阳性。
 
+### 0.2.5 「画面可操作」真机验证（2026-11-14）
+
+用户报障：「为什么只有画面不能操作？应该是可以操作的」。先证明后端没坏——直打产品接口注入
+输入，前后帧 sha256 真的变了（`288e5b9f4a39 → 361b73042802`），于是范围收到前端。
+
+本机没有 Playwright 浏览器，用 `playwright-core`（不下载浏览器）+ 系统 Edge 跑**真实指针
+事件**，并在页面里拦 `/api/screen/*`，把「用户做了个手势 → 到底有没有请求发出去」量化。
+修复前后（同一台机、同一分辨率、同一套探针）：
+
+| 场景 | 修复前 | 修复后 |
+|---|---|---|
+| 单击 | `tap {539,961}` | `tap {539,961}` |
+| **有 3px 手抖的单击** | **0 条（点了没反应）** | `tap {549,968}` |
+| **拖拽上滑 400px** | **0 条（滑不动）** | `swipe {539,1589 → 539,334, 196ms}` |
+| 拖拽后的单击 | `tap` | `tap`（没被上次拖拽污染） |
+| 长按 900ms | `tap`（长按被压成点击） | `swipe {539,961 → 539,961, 902ms}`（原地按住） |
+| 很小的真拖拽 20px | 被吞 | `swipe {539,961 → 539,899, 100ms}` |
+
+两个真因（详见 IMPL 偏差 17）：`<img>` 默认 `draggable=true`，拖拽触发原生 HTML5 drag →
+`pointercancel` 把 `_dragStart` 清掉，swipe 一条都发不出；点击阈值写成 `dx < 8`（**设备像素**），
+而这台机 1 CSS px ≈ 3.14 设备像素，容差实际只有 2.5 个浏览器像素，手抖就被判成 swipe 且被抬到
+50ms → `input swipe x y x+3 y 50` 等于没动。
+
+不只验「请求发出去了」，还用画面 sha256 确认**设备端真的动了**（真实 Release 产物
+`0.2.5`，展开后按包用户 uid 跑服务）：
+
+| 场景 | 客观判据 | 结果 |
+|---|---|---|
+| 桌面拖拽上滑 | 画面 PNG sha256 | `1ad36188ba1b → d5574f69387b`（打开应用抽屉） |
+| 应用内单击（Flashlight 主开关） | 画面 PNG sha256 | `459f8601fa69 → 86e812326aae →` 再点切回 `9a91aac13d07` |
+| 长按桌面 900ms | hash + 停留稳定性 | 变化且稳定 1.2s（弹层停住），`back` 后恢复 |
+
+同一次实例启动链也复验：`[boot] boot_completed in 30896ms`、`gpu=host`、`adbConnected=true`、
+服务版本 `0.2.5`（`/api/health`）。
+
 **CI 侧一个小插曲（记下来免得下次重踩）**：`v0.2.4` 首轮 CI 的 `Release` 与 Linux 单测都绿，
 两个 Windows job 却红。拉日志看到是**新用例自身的跨平台问题**，不是包的问题：
 
@@ -309,10 +354,11 @@ emulator 日志: vulkan_mode_selected:host gles_mode_selected:host
 
 | 项 | 状态 |
 |---|---|
-| **真实 tag 触发的 GitHub Actions** | ✅ **已实际跑过六次**（`v0.1.0`～`v0.2.4`），`Release` 与 `CI` 全绿；`Sync fnpack.json` 每次自动提交回 `main`（`8dd063d` / `3ec0d3d` / `ab3dc7b` 分别对应 0.2.2 / 0.2.3 / 0.2.4） |
-| **Release 资产与 sha256** | ✅ `0.2.4` 资产 105,445 B / `c7a010da…`，与 GitHub asset digest、`fnpack.json` 逐字一致；Release body 用 tag 注释正文 |
+| **真实 tag 触发的 GitHub Actions** | ✅ **已实际跑过七次**（`v0.1.0`～`v0.2.5`），`Release` 与 `CI` 全绿；`Sync fnpack.json` 每次自动提交回 `main`（`8dd063d` / `3ec0d3d` / `ab3dc7b` / `2bfbe55` 分别对应 0.2.2 / 0.2.3 / 0.2.4 / 0.2.5）；`v0.2.4` 首轮 Windows job 红过两次，原因是新用例自身的跨平台假设，包字节未变（见上节） |
+| **Release 资产与 sha256** | ✅ `0.2.5` 资产 107,688 B / `283f0ad4…`，与 GitHub asset digest、`fnpack.json` 逐字一致；包内 `ui/screen.js` 等三个改动文件与仓库 sha256 逐字一致；Release body 用 tag 注释正文 |
 | **App Center 图形界面点击安装** | ✅ **已闭环**：用户通过 App Center 装成 `0.2.3`，服务被平台拉起监听 `18990`（`/vol2/@appcenter/apkstart-fnos/server/index.js`，`/api/health` 返回 `version 0.2.3`），随后真机报障的正是模拟器启动链——说明安装、解包、服务拉起三环都由平台真实调度过 |
-| **0.2.4 通过 App Center 覆盖安装** | ⚠️ 待用户点一次：包结构与 0.2.3 同构（`validate-package.js` 断言一致），差异只在 `server/` 三个文件，风险面很小 |
+| **0.2.5 通过 App Center 覆盖安装** | ⚠️ 待用户点一次：包结构与 0.2.4 同构（`validate-package.js` 断言一致，根 21 / app.tgz 43），差异只在 `ui/` 两个文件与 `server/api/screen.js`，风险面很小 |
+| **画面可操作（点击 / 拖拽 / 长按）** | ✅ 真 Release 产物 + 真实浏览器指针事件验证：手势全部落成请求，且设备端画面 sha256 有对应变化（见「0.2.5 画面可操作真机验证」）；用户侧覆盖安装后可复验 |
 | **fnDepot 客户端实际收录** | ⚠️ 未验：需要在客户端里「添加源」指向本仓库 `fnpack.json`，本地只能证明元数据符合 V2 schema |
 
 ### 手工安装的等价路径（无 App Center 时）
