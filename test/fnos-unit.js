@@ -26,19 +26,35 @@ const {
   CMD_RESUMED,
   CMD_FOCUS,
 } = require('../server/service/foreground');
+const {
+  buildXserverArgs,
+  parseDisplayNum,
+  parseReadyLog,
+  parseBindConflict,
+  parseFatalError,
+  pickXkbDir,
+  pickXkbBinCwd,
+  ensureXkbRoot,
+  findXkbcompBin,
+  cleanStaleDisplay,
+  socketPathFor,
+} = require('../server/service/xserver');
+const { resolveGpuMode } = require('../server/service/gpu');
 
 let passed = 0;
 let failed = 0;
 const pending = [];
 
 function test(name, fn) {
+  // 注意：不能「先调用一次看是不是 Promise」——那会让每个异步用例跑两遍，
+  // 第一遍的 rejection 没人接，直接变成 unhandled 崩溃（曾把 50ms 轮询用例
+  // 干扰成「只采了 1 次」）。按函数类型判断即可。
+  if (fn && fn.constructor && fn.constructor.name === 'AsyncFunction') {
+    pending.push({ name, fn });
+    return;
+  }
   try {
-    const r = fn();
-    if (r && typeof r.then === 'function') {
-      // 异步用例（waitForPackage 轮询）单独收集，最后串行跑
-      pending.push({ name, fn });
-      return;
-    }
+    fn();
     passed++;
     console.log(`  ✓ ${name}`);
   } catch (e) {
@@ -465,6 +481,190 @@ test('current() 焦点采样失败（adb 抛错）→ 兜住，仍用 Activity �
   const fg = await current(adb);
   assertEqual(fg.package, 'com.simplemobiletools.flashlight', '一条命令失败不能拖垮整个采样');
   assertEqual(fg.systemSurface, false);
+});
+
+/* ------------------------------------------------------------------ */
+console.log('\n[xserver.js / 硬件 3D X display]');
+
+test('命令行必须带 -interface 127.0.0.1（缺它 websocketPort 绑定失败报 98）', () => {
+  const args = buildXserverArgs({ display: ':9' });
+  const i = args.indexOf('-interface');
+  assert(i >= 0, '缺少 -interface');
+  assertEqual(args[i + 1], '127.0.0.1', '-interface 必须是回环');
+});
+
+test('命令行带 -hw3d -drinode（否则只是普通 VNC，拿不到 GPU）', () => {
+  const args = buildXserverArgs({ display: ':9' });
+  assert(args.includes('-hw3d'), '缺少 -hw3d');
+  const i = args.indexOf('-drinode');
+  assertEqual(args[i + 1], '/dev/dri/renderD128');
+});
+
+test('-SecurityTypes None 必须同时只绑回环（避免无鉴权 VNC 暴露到局域网）', () => {
+  const args = buildXserverArgs({ display: ':9' });
+  const i = args.indexOf('-SecurityTypes');
+  assertEqual(args[i + 1], 'None');
+  assertEqual(args[args.indexOf('-interface') + 1], '127.0.0.1');
+});
+
+test('display 放在首个参数位（X server 的位置参数约定）', () => {
+  assertEqual(buildXserverArgs({ display: ':11' })[0], ':11');
+  assertEqual(buildXserverArgs({})[0], ':9', '默认 :9');
+});
+
+test('parseDisplayNum 解析 :N，拒绝非法值', () => {
+  assertEqual(parseDisplayNum(':9'), 9);
+  assertEqual(parseDisplayNum(' :12 '), 12);
+  assertEqual(parseDisplayNum(':9.0'), 9);
+  assert(Number.isNaN(parseDisplayNum('9')), '缺冒号应视为非法');
+  assert(Number.isNaN(parseDisplayNum('')), '空串应视为非法');
+});
+
+test('socketPathFor 指向 /tmp/.X11-unix/XN', () => {
+  assertEqual(socketPathFor(':9'), '/tmp/.X11-unix/X9');
+  assertEqual(socketPathFor('bad'), null);
+});
+
+test('就绪判定认 vncext 两行（真机原文）', () => {
+  assert(parseReadyLog('vncext: Listening for VNC connections on all interface(s), port 5996'), 'VNC 行');
+  assert(parseReadyLog('vncext: Listening for websocket connections on 127.0.0.1 interface(s), port 6996'), 'ws 行');
+  assert(!parseReadyLog('vncExtInit: failed to bind socket'), '失败行不能判就绪');
+});
+
+test('端口冲突判定认「Address already in use」→ 换槽位重试', () => {
+  // 真机原文（简写版会截掉 "websocketPort"，判据必须落在 Address already in use 上）
+  const real = 'vncExtInit: failed to bind socket, is someone else on our -websocketPort?: Address already in use (98)';
+  assert(parseBindConflict(real), '必须识别端口冲突');
+  assert(!parseBindConflict('Could not init font path element'), '字体路径问题不算冲突');
+});
+
+test('传 -xkbdir（缺它时 X server 会 XKB fatal 退出，真机踩过）', () => {
+  const args = buildXserverArgs({ display: ':9', xkbDir: '/usr/share/X11/xkb' });
+  const i = args.indexOf('-xkbdir');
+  assert(i >= 0, '缺少 -xkbdir');
+  assertEqual(args[i + 1], '/usr/share/X11/xkb');
+  assert(!buildXserverArgs({ display: ':9' }).includes('-xkbdir'), '无 xkb 目录时不该硬塞');
+});
+
+test('pickXkbDir 优先二进制自带树，其次宿主 /usr/share/X11/xkb', () => {
+  const bin = '/opt/app/usr/bin/Xkasmvnc';
+  const own = '/opt/app/usr/share/X11/xkb';
+  assertEqual(pickXkbDir(bin, (p) => p === own), own, '自带树优先');
+  assertEqual(pickXkbDir(bin, (p) => p === '/usr/share/X11/xkb'), '/usr/share/X11/xkb', '回退宿主');
+  assertEqual(pickXkbDir(bin, () => false), '', '都没有则留空');
+});
+
+test('pickXkbBinCwd 能找到相对 .xkbbin/xkbcomp 的打包根（否则 X 起来 1 秒就死）', () => {
+  const bin = '/opt/app/vendor/runtime/usr/bin/Xkasmvnc';
+  const root = '/opt/app/vendor/runtime';
+  assertEqual(pickXkbBinCwd(bin, (p) => p === `${root}/.xkbbin/xkbcomp`), root);
+  assertEqual(pickXkbBinCwd(bin, () => false), '', '没有 .xkbbin 就用默认 cwd');
+});
+
+test('fatal 判定认「Fatal server error」（xkb/gpu 初始化失败要立刻失败，别等满 10s）', () => {
+  assert(parseFatalError('(EE) Fatal server error:\n(EE) Failed to activate virtual core keyboard: 2'));
+  assert(!parseFatalError('vncext: Listening for websocket connections'), '正常就绪行不是 fatal');
+});
+
+test('findXkbcompBin 优先二进制同前缀的 bin，其次 /usr/bin', () => {
+  const bin = '/opt/app/usr/bin/Xkasmvnc';
+  assertEqual(findXkbcompBin(bin, (p) => p === '/opt/app/usr/bin/xkbcomp'), '/opt/app/usr/bin/xkbcomp');
+  assertEqual(findXkbcompBin(bin, (p) => p === '/usr/bin/xkbcomp'), '/usr/bin/xkbcomp');
+});
+
+test('只有裸二进制时造 .xkbbin/xkbcomp 软链 shim（否则 -xkbdir 也救不了，X 直接 fatal）', () => {
+  const fs = require('fs');
+  const os = require('os');
+  const path = require('path');
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'xkbshim-'));
+  const bin = '/nonexistent/usr/bin/Xkasmvnc';
+  const root = ensureXkbRoot(bin, tmp, (p) => p === '/usr/bin/xkbcomp');
+  assertEqual(root, path.join(tmp, 'xkbroot'), '返回可直接当 cwd 的目录');
+  // 目标在 macOS 上不存在，属悬空软链，只能 lstat（existsSync 对悬空链接返回 false）
+  assert(fs.lstatSync(path.join(root, '.xkbbin', 'xkbcomp')).isSymbolicLink(), '软链必须落在 <cwd>/.xkbbin/xkbcomp');
+  assertEqual(fs.readlinkSync(path.join(root, '.xkbbin', 'xkbcomp')), '/usr/bin/xkbcomp');
+  // 幂等：再调一次不该抛错
+  assertEqual(ensureXkbRoot(bin, tmp, (p) => p === '/usr/bin/xkbcomp'), root);
+  // 连 xkbcomp 都没有时返回空串（保持原 cwd，让 fatal 暴露而不是假装成功）
+  assertEqual(ensureXkbRoot(bin, tmp, () => false), '');
+  fs.rmSync(tmp, { recursive: true, force: true });
+});
+
+test('cleanStaleDisplay 把死掉的 lock 当垃圾清掉（否则一次异常退出就永久 Cannot establish any listening sockets）', () => {
+  const fs = require('fs');
+  const n = 9700 + (process.pid % 100); // 避开真机真实槽位
+  const lock = `/tmp/.X${n}-lock`;
+  // 用一个必然不存在的 pid 模拟「X 被 SIGKILL 后留下的 lock」
+  fs.writeFileSync(lock, '999999\n');
+  assertEqual(cleanStaleDisplay(`:${n}`), 'cleaned', 'pid 不存在 → 清掉');
+  assert(!fs.existsSync(lock), 'lock 已删除');
+  // 没 lock 没 socket → absent（不谎报 cleaned）
+  assertEqual(cleanStaleDisplay(`:${n}`), 'absent');
+});
+
+test('cleanStaleDisplay 不因 pid 复用永久占住槽位（pid 活着但不是 X server → 仍清理）', () => {
+  const fs = require('fs');
+  // 判定依赖 /proc/<pid>/cmdline，仅 Linux 有意义（真机 fnOS 就是 Linux）。
+  if (!fs.existsSync('/proc/self/cmdline')) return;
+  const n = 9800 + (process.pid % 100);
+  const lock = `/tmp/.X${n}-lock`;
+  fs.writeFileSync(lock, `${process.pid}\n`); // 我们自己活着，但命令行不是 X
+  assertEqual(cleanStaleDisplay(`:${n}`), 'cleaned');
+  assert(!fs.existsSync(lock));
+});
+
+/* ------------------------------------------------------------------ */
+console.log('\n[gpu.js / -gpu 模式裁决]');
+
+test('gpu=off → off（不看任何前提）', () => {
+  const r = resolveGpuMode({ want: 'off', hasDisplay: true, renderNodeUsable: true });
+  assertEqual(r.mode, 'off');
+  assertEqual(r.reason, 'configured-off');
+});
+
+test('gpu=auto + 有 X + 有 render node → host（拿到 ~3.3s 收益）', () => {
+  const r = resolveGpuMode({ want: 'auto', hasDisplay: true, renderNodeUsable: true });
+  assertEqual(r.mode, 'host');
+  assertEqual(r.reason, 'auto-host');
+});
+
+test('gpu=auto + 无 X → off（不是所有 fnOS 都有 Xkasmvnc）', () => {
+  const r = resolveGpuMode({ want: 'auto', hasDisplay: false, renderNodeUsable: true });
+  assertEqual(r.mode, 'off');
+  assertEqual(r.reason, 'no-xserver');
+});
+
+test('gpu=auto + 无 render node → off', () => {
+  const r = resolveGpuMode({ want: 'auto', hasDisplay: true, renderNodeUsable: false });
+  assertEqual(r.mode, 'off');
+  assertEqual(r.reason, 'no-render-node');
+});
+
+test('显式 host 但无 X display → 降级 off（旧实现漏这条，用户一改设置就 2s 静默崩溃）', () => {
+  const r = resolveGpuMode({ want: 'host', hasDisplay: false, renderNodeUsable: true });
+  assertEqual(r.mode, 'off');
+  assertEqual(r.reason, 'no-xserver');
+  assert(/X server/.test(r.message), '要给得出原因');
+});
+
+test('显式 swiftshader_indirect 但无 X → 也降级 off（纯软件渲染同样需要 windowing system）', () => {
+  const r = resolveGpuMode({ want: 'swiftshader_indirect', hasDisplay: false, renderNodeUsable: true });
+  assertEqual(r.mode, 'off');
+});
+
+test('显式 host + X 齐全 → 尊重配置', () => {
+  const r = resolveGpuMode({ want: 'host', hasDisplay: true, renderNodeUsable: true });
+  assertEqual(r.mode, 'host');
+  assertEqual(r.reason, 'configured');
+});
+
+test('gpuAutoEnable=false 时 auto 不自动开（用户显式关掉自动加速）', () => {
+  const r = resolveGpuMode({ want: 'auto', hasDisplay: true, renderNodeUsable: true, autoEnabled: false });
+  assertEqual(r.mode, 'off');
+});
+
+test('未知模式一律回落 off（不让拼写错误变成 2 秒崩溃）', () => {
+  assertEqual(resolveGpuMode({ want: 'nonsense', hasDisplay: true, renderNodeUsable: true }).mode, 'off');
 });
 
 /* ------------------------------------------------------------------ */

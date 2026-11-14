@@ -123,6 +123,10 @@ class Engine {
       foregroundDetail: running ? (this._health.foregroundDetail || null) : null,
       screen: running ? (this._health.screen || null) : null,
       kvm: { available: rt.kvm.available, writable: rt.kvm.writable },
+      // GPU 裁决与 X server 探测结果：让「我配了 host 为何是 off」在接口里可解释，
+      // 不用去翻 service.log（IMPL 偏差 5 改造方案第 5 步的可观测性部分）。
+      gpu: emu.gpu,
+      xserver: emu.xserver,
       bootMs: emu.bootMs,
       rssMB: running ? emu.rssMB : null,
       error: emu.error || (this.provision.progress().error || null),

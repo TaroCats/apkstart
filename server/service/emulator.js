@@ -12,6 +12,8 @@ const path = require('path');
 const { spawn } = require('child_process');
 const { AdbClient } = require('../../core/adb');
 const { checkKvmAccess } = require('./kvm');
+const { XServer } = require('./xserver');
+const { resolveGpuMode } = require('./gpu');
 const { SYSTEM_IMAGE, SYSTEM_IMAGE_DIR } = require('../config');
 
 const EMULATOR_PORT = 5554;
@@ -73,7 +75,7 @@ function parseDisabledPackages(text) {
 }
 
 class EmulatorManager {
-  constructor({ paths, provision, settingsGetter }) {
+  constructor({ paths, provision, settingsGetter, xserver }) {
     this.paths = paths;
     this.provision = provision;
     this.settingsGetter = settingsGetter || (() => ({ emulator: {} }));
@@ -85,6 +87,13 @@ class EmulatorManager {
     this._adb = null;
     this._logs = [];
     this._startedAt = 0;
+    // 硬件 3D X display 管理器（IMPL 偏差 5 改造方案）。可注入以便单测替身。
+    this.xserver = xserver || new XServer({ paths, settingsGetter: this.settingsGetter });
+    if (typeof this.xserver._onLog !== 'function') {
+      this.xserver._onLog = (line) => this._pushLog(line);
+    }
+    // 最近一次 start() 实际使用的 gpu 模式与裁决原因（供 /api/status 展示）
+    this.gpu = { mode: 'off', want: 'auto', reason: '', message: '' };
   }
 
   _settings() {
@@ -125,12 +134,13 @@ class EmulatorManager {
   }
 
   /** 手写 AVD 配置（ARCH §5.4）。已存在且不 wipe 且镜像标签一致则复用。 */
-  ensureAvd({ wipe = false } = {}) {
+  ensureAvd({ wipe = false, gpuMode } = {}) {
     const cfg = this._settings();
     const name = cfg.name || 'apkstart';
     const memMB = this._effectiveMemMB(cfg);
-    // 与 DEFAULT_SETTINGS 保持一致：gpu=off 是 fnOS 包用户下的可用默认值（偏差 5）
-    const gpuMode = this._effectiveGpu(cfg);
+    // 与 DEFAULT_SETTINGS 保持一致；start() 已裁决过就直接用裁决结果，
+    // 避免 config.ini 与命令行 `-gpu` 自相矛盾（历史 bug：写死 swiftshader_indirect）。
+    const mode = gpuMode || this._effectiveGpu(cfg);
     const avdHome = this.paths.AVD;
     const avdDir = path.join(avdHome, `${name}.avd`);
     const iniPath = path.join(avdHome, `${name}.ini`);
@@ -176,8 +186,8 @@ class EmulatorManager {
       'hw.lcd.density=420',
       `hw.ramSize=${memMB}`,
       'disk.dataPartition.size=4G',
-      `hw.gpu.enabled=${gpuMode === 'off' ? 'no' : 'yes'}`,
-      `hw.gpu.mode=${gpuMode}`,
+      `hw.gpu.enabled=${mode === 'off' ? 'no' : 'yes'}`,
+      `hw.gpu.mode=${mode}`,
       'hw.keyboard=yes',
       'hw.mainKeys=no',
       '',
@@ -197,17 +207,38 @@ class EmulatorManager {
   }
 
   /**
-   * 生效 GPU 模式。配置优先，但 swiftshader_indirect 需要读 /dev/dri/renderD128；
-   * fnOS 上该节点是 root:render 0660，包用户 apkstart-fnos 通常不在 render 组，
-   * 拿不到就退化到 -gpu off（否则 QEMU「main loop exits abnormally with code 1」）。
-   * 这里做运行期兜底降级，避免旧 settings.json 里残留的 swiftshader_indirect 卡死启动。
+   * 生效 GPU 模式（ARCH §1.4 / IMPL 偏差 5 更正后的完整前提）。
+   *
+   * 三条前提缺一不可，任一不满足就降级 `-gpu off`：
+   *   ① 一个带硬件 3D 的 X display（`-gpu host` 走宿主 GL，无 X 时 QEMU 2s 崩）
+   *   ② `/dev/dri/renderD128` 可读写（`render` 组）
+   *   ③ 模式本身不是 `off`
+   *
+   * 旧实现只校验 ②，**漏了 ①**：没有 X 的机器上用户把 gpu 改成 host/swiftshader
+   * 就是 2 秒静默崩溃。这里补齐，并把裁决原因留在 `this.gpu` 供状态接口展示。
+   *
+   * @param {object} [cfg] emulator 段设置
+   * @param {{hasDisplay?:boolean}} [opts] 测试注入（默认按 xserver 探测结果）
    */
+  _resolveGpu(cfg, opts = {}) {
+    const s = cfg || this._settings();
+    let hasDisplay = opts.hasDisplay;
+    if (hasDisplay === undefined) {
+      // 计划阶段按「可用」算（binary 支持 -hw3d 即可），真正拉起在 start() 里做。
+      const found = this.xserver.locate();
+      hasDisplay = this.xserver.isReady() || !!(found && found.hw3d);
+    }
+    return resolveGpuMode({
+      want: s.gpu,
+      hasDisplay,
+      renderNodeUsable: this._renderNodeUsable(),
+      autoEnabled: s.gpuAutoEnable !== false,
+    });
+  }
+
+  /** 兼容旧调用点：只取模式字符串。 */
   _effectiveGpu(cfg) {
-    const want = String((cfg && cfg.gpu) || 'off').toLowerCase();
-    if (want !== 'swiftshader_indirect') return want;
-    if (this._renderNodeUsable()) return want;
-    this._pushLog('[gpu] /dev/dri/renderD128 不可读写（包用户缺 render 组权限），已降级为 -gpu off');
-    return 'off';
+    return this._resolveGpu(cfg).mode;
   }
 
   /**
@@ -313,7 +344,7 @@ class EmulatorManager {
     return args;
   }
 
-  _spawnEnv() {
+  _spawnEnv(extra = {}) {
     return {
       ...process.env,
       ANDROID_AVD_HOME: this.paths.AVD,
@@ -326,12 +357,19 @@ class EmulatorManager {
       // 若两端不同值（旧实现漏传 → 模拟器去 5037，客户端走 5044），
       // 客户端就永远看不到设备（真机实测：5037 被宿主其他 adb server 占用）。
       ANDROID_ADB_SERVER_PORT: process.env.ANDROID_ADB_SERVER_PORT || '5044',
+      // DISPLAY 只在 X server 确实就绪时传（IMPL 偏差 5 改造方案 第 3 步）。
+      // 绝不能传一个假值：`-gpu != off` 且 DISPLAY 不可连时 QEMU 2s 内崩。
+      ...extra,
     };
   }
 
   /**
    * 启动模拟器并等待 boot_completed。返回 {status:'running', bootMs}。
    * 失败抛错（code: RUNTIME_NOT_READY / CONFLICT / EMULATOR_ERROR）。
+   *
+   * 若启用了 GPU（`-gpu != off`）却启动失败，自动用 `-gpu off` 重试一次：
+   * 宿主 GL/X 环境的坏法千奇百怪（Mesa 升级、驱动缺失、X 半死），
+   * 不值得让用户因为「开了加速反而起不来」而回不去。降级路径一定会告知日志。
    */
   async start({ wipe = false } = {}) {
     if (this.state === 'running' || this.state === 'starting') {
@@ -345,15 +383,73 @@ class EmulatorManager {
       throw err;
     }
 
+    // 先清空上一次的日志，再让 _prepareGpu 把「为什么用/不用 GPU」写进来；
+    // _startOnce 不再清空，否则用户拿到的日志里看不到降级原因。
+    this._logs = [];
+    const gpu = await this._prepareGpu();
+    try {
+      return await this._startOnce({ wipe, gpuMode: gpu.mode, display: this.xserver.displayEnv() });
+    } catch (e) {
+      if (gpu.mode === 'off') throw e;
+      this._pushLog(`[gpu] -gpu ${gpu.mode} 启动失败（${e.message}），自动降级 off 重试`);
+      try { await this.stop(); } catch (_) { /* ignore */ }
+      await this.xserver.stop();
+      this.state = 'stopped';
+      this.gpu = { mode: 'off', want: gpu.want, reason: 'fallback-after-failure', message: `-gpu ${gpu.mode} 启动失败，已降级 off` };
+      return this._startOnce({ wipe, gpuMode: 'off', display: '' });
+    }
+  }
+
+  /**
+   * 决定本次启动的 GPU 模式，并在需要时把硬件 3D 的 X display 拉起来。
+   * @returns {Promise<{mode:string, want:string, reason:string, message:string}>}
+   */
+  async _prepareGpu() {
+    const cfg = this._settings();
+    // 显式配了 xserverPath 却被忽略时要说出来：locate() 会因为「文件不存在 /
+    // 不可执行」直接跳到下一个候选，用户否则永远不知道自己的配置没生效。
+    const configured = String(cfg.xserverPath || '').trim();
+    if (configured) {
+      const found = this.xserver.locate();
+      if (!found || found.source !== 'settings') {
+        this._pushLog(`[gpu] 配置的 xserverPath=${configured} 不可用，已改用 ${found ? `${found.source}:${found.bin}` : '（无可用 X server）'}`);
+      }
+    }
+    let r = this._resolveGpu(cfg);
+    if (r.mode === 'off') {
+      if (r.reason !== 'configured-off') this._pushLog(`[gpu] ${r.message}`);
+      this.gpu = r;
+      return r;
+    }
+    const xr = await this.xserver.ensureStarted();
+    if (!xr.ok) {
+      r = {
+        mode: 'off',
+        want: r.want,
+        reason: 'no-xserver',
+        message: `X server 未就绪（${xr.reason}），已降级为 -gpu off`,
+      };
+      this._pushLog(`[gpu] ${r.message}`);
+      this.gpu = r;
+      return r;
+    }
+    this.gpu = r;
+    this._pushLog(`[gpu] ${r.message}（DISPLAY=${xr.display}）`);
+    return r;
+  }
+
+  /** 单次启动（不含降级重试）。 */
+  async _startOnce({ wipe = false, gpuMode = 'off', display = '' } = {}) {
     this.state = 'starting';
     this.error = null;
     this._startedAt = Date.now();
-    this._logs = [];
+    // 不清空 _logs：start() 已经在调 _prepareGpu 之前清过一次，里面是 GPU 裁决
+    // 与降级原因，清掉就等于「我配了 host 为什么是 off」查无实据。
 
     const cfg = this._settings();
     const kvm = checkKvmAccess();
     const avdName = cfg.name || 'apkstart';
-    this.ensureAvd({ wipe });
+    this.ensureAvd({ wipe, gpuMode });
 
     const bin = this._emulatorBin();
     if (!fs.existsSync(bin)) {
@@ -370,14 +466,15 @@ class EmulatorManager {
       memMB: this._effectiveMemMB(cfg),
       cores: this._effectiveCores(cfg),
       kvmWritable: kvm.writable,
-      gpu: this._effectiveGpu(cfg),
+      gpu: gpuMode,
       wipe,
     });
 
     this._pushLog(`[start] ${bin} ${args.join(' ')}`);
-    this._pushLog(`[start] KVM available=${kvm.available} writable=${kvm.writable} accel=${kvm.writable ? 'on' : 'off'}`);
+    this._pushLog(`[start] KVM available=${kvm.available} writable=${kvm.writable} accel=${kvm.writable ? 'on' : 'off'} gpu=${gpuMode}${display ? ` display=${display}` : ''}`);
 
-    const child = spawn(bin, args, { env: this._spawnEnv(), stdio: ['ignore', 'pipe', 'pipe'] });
+    const env = this._spawnEnv(display ? { DISPLAY: display } : {});
+    const child = spawn(bin, args, { env, stdio: ['ignore', 'pipe', 'pipe'] });
     this._child = child;
     this.pid = child.pid;
 
@@ -469,7 +566,11 @@ class EmulatorManager {
 
   /** 优雅停止：adb emu kill → 等待 → SIGKILL。幂等。 */
   async stop() {
-    if (this.state === 'stopped' && !this._child) return { stopped: true };
+    if (this.state === 'stopped' && !this._child) {
+      // 模拟器本来就没跑，但可能还留着上次拉起的 X server（异常退出场景）
+      try { await this.xserver.stop(); } catch (_) { /* ignore */ }
+      return { stopped: true };
+    }
     this.state = 'stopping';
     const adb = this.adb();
     try { await adb.exec(['emu', 'kill'], { timeout: 10000 }); } catch (_) { /* ignore */ }
@@ -485,6 +586,9 @@ class EmulatorManager {
     this._child = null;
     this.pid = null;
     this.state = 'stopped';
+    // 模拟器停了就把我们自己拉起的 X server 一起收掉：不留常驻进程，
+    // 也不用担心它长期占着 renderD128 / 5996 / 6996（IMPL 偏差 5 改造方案）。
+    try { await this.xserver.stop(); } catch (_) { /* ignore */ }
     this._pushLog('[stop] stopped');
     return { stopped: true };
   }
@@ -504,12 +608,18 @@ class EmulatorManager {
   status() {
     // 若声明 running 但进程已消失 → 纠正为 stopped
     if (this.state === 'running' && !this._child) this.state = 'stopped';
+    let xserver = null;
+    try { xserver = this.xserver.status(); } catch (_) { /* ignore */ }
     return {
       state: this.state,
       pid: this.pid,
       bootMs: this.bootMs,
       rssMB: this._rssMB(),
       error: this.error,
+      // GPU 裁决结果：mode 是实际生效值，want 是配置值，reason 是降级原因。
+      // 前端/日志靠这个解释「为什么我配了 host 却是 off」。
+      gpu: { ...this.gpu },
+      xserver,
     };
   }
 }

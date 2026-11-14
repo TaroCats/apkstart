@@ -28,16 +28,18 @@ const DEFAULT_SETTINGS = {
     abi: 'x86_64',
     memoryMB: 2048, // 0=自动（按机器内存，cap 4096）
     cores: 2, // 0=自动（min(4, 物理核/2)）
-    // 默认 -gpu off（真机 A/B 实测，见 IMPL 偏差 5 及其更正）：
-    //   卡点不是权限。实测包用户加入 render + video 组后，qemu 能正常持有
-    //   6 个 /dev/dri/renderD128 fd 并以 -gpu host 开机；真正的门槛是宿主
-    //   需要一个「带硬件 3D 的 X display」——fnOS 自带的 Xvnc(TigerVNC 1.12)
-    //   和 Xvfb 都不支持 -hw3d，只有 KasmVNC 的 Xkasmvnc 支持，而它不在 PATH、
-    //   需随包携带 5.5MB。净收益仅 ~3.3s（off 中位 30960ms → host 中位 27666ms，
-    //   -10.6%），不足以抵消体积/许可证/常驻进程的成本，故默认仍取 off。
-    //   没有 DISPLAY 却配了 swiftshader_indirect/host 时，QEMU 会 2s 内
-    //   「main loop exits abnormally with code 1」；_effectiveGpu() 负责兜底降级。
-    gpu: 'off',
+    // GPU 模式：'auto' | 'off' | 'host' | 'swiftshader_indirect' | ...
+    //   auto（默认）= 宿主有「带 -hw3d 的 X server」且能读写 renderD128 时用 host，
+    //   否则 off。裁决逻辑见 server/service/gpu.js，前提与实测见 IMPL 偏差 5 更正。
+    //   实测收益：off 中位 30960ms → host 中位 27666ms（-3.3s / -10.6%）。
+    //   注意：任何非 off 模式都必须有 X display，否则 QEMU 2s 内崩（旧实现漏校验）。
+    gpu: 'auto',
+    // 是否允许 auto 模式自动启用加速（关掉则等价于 gpu:'off'，但保留配置）
+    gpuAutoEnable: true,
+    // 显式指定 Xkasmvnc 路径（留空则按 RUNTIME/xserver/Xkasmvnc → PATH 探测）。
+    // 本包**不自带**该二进制：KasmVNC 是 GPL-2.0，且依赖 libxfont2/libpixman/
+    // libunwind/libwebp/libxshmfence 等独立包，随包分发不划算（详见 xserver.js 头注）。
+    xserverPath: '',
     idleShutdownMinutes: 0, // 0=不自动关机
     // 开机后禁用蓝牙子系统（IMPL 偏差 9）。无头模拟器没有 netsim/蓝牙后端，
     // com.android.bluetooth 会反复崩溃并弹「Bluetooth keeps stopping」，

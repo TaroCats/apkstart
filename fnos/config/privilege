@@ -1,1 +1,1 @@
-{"defaults":{"run-as":"package"},"username":"apkstart-fnos","groupname":"apkstart-fnos","join-groups":["all.editor"]}
+{"defaults":{"run-as":"package"},"username":"apkstart-fnos","groupname":"apkstart-fnos","join-groups":["all.editor","render","video"]}

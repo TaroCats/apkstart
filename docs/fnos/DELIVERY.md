@@ -47,7 +47,7 @@ fnos/
 │   └── upgrade_init  upgrade_callback
 │   └── config_init  config_callback
 ├── config/
-│   ├── privilege        # {"defaults":{"run-as":"package"},"join-groups":["all.editor"]}
+│   ├── privilege        # {"defaults":{"run-as":"package"},"join-groups":["all.editor","render","video"]}
 │   └── resource         # port 8890 / memory_mb 4096
 └── wizard/{install,uninstall}
 ```
@@ -82,8 +82,8 @@ fnos/
 
 ### 改动（被真机暴露出来的 3 个产品级问题）
 
-1. **权限链**：`/dev/kvm` 是 `root:all.editor 0660`。解决方式不是 `usermod`，而是 `config/privilege` 的 `join-groups:["all.editor"]` 让 fnOS 在安装期把包用户加进去。
-2. **图形渲染**：默认 `-gpu off`，实测开机 30.9~31.3s。~~`/dev/dri/renderD128` 是 `root:render 0660`、组内只有 `marvis-app`，包用户拿不到 → `-gpu off` 是权限模型下的确定结论~~ —— **此归因已在后续实测中证伪，见下节「补充验证：GPU 加速到底卡在哪」**。
+1. **权限链**：`/dev/kvm` 是 `root:all.editor 0660`。解决方式不是 `usermod`，而是 `config/privilege` 的 `join-groups:["all.editor","render","video"]` 让 fnOS 在安装期把包用户加进去（`render`/`video` 是 v0.2 为 GPU 加的，分别供 `renderD128` 与 `card0`）。
+2. **图形渲染**：v0.1 默认 `-gpu off`，实测开机 30.9~31.3s。~~`/dev/dri/renderD128` 是 `root:render 0660`、组内只有 `marvis-app`，包用户拿不到 → `-gpu off` 是权限模型下的确定结论~~ —— **此归因已在后续实测中证伪**：权限补上后仍需「带硬件 3D 的 X display」，v0.2 已把该能力做成可选（默认 `gpu: 'auto'`，−12.0%）。见下节「补充验证：GPU 加速到底卡在哪」。
 3. **前台检测两处修复（v7/v8）**
    - **P1**：`POST /api/apps/:pkg/start` 把刚启动成功的应用报成桌面。根因 `waitForPackage` 默认 4s，`-gpu off` 软渲染下 splash→main 切换慢，末次采样落在 launcher。改 12s 并在 `installer.js` L140/L177 显式传参。
    - **P2**：ANR / Application Error 弹窗匹配不上。Android 14 弹窗形如 `mCurrentFocus=Window{7061971 u0 Application Not Responding: com.android.systemui}`，**没有 `pkg/activity`**，且此时 `topResumedActivity` 仍是下方 launcher —— 只看 resumed 分支必然谎报。新增 `parseSystemDialog` + 两条弹窗正则，采样顺序改为「先窗口焦点（弹窗命中即返回）→ 再 resumed → 再 focus」，`pickForeground()` 同步。
@@ -173,17 +173,19 @@ qemu 进程 `Uid: 926`（即包用户 `apkstart-fnos`），日志含 `Selecting 
 
 **净收益 ≈ 3.3s（-10.6%）**。此前一度观察到「root 22s vs off 34s」的 12s 差距，含冷启动与噪声，不可复现；开机主要耗在 Android framework/zygote，不在 GL。
 
-### 决策：默认仍保持 `-gpu off`
+### 决策：v0.2 起默认 `gpu: 'auto'`（已实施）
 
-不把这个能力做进默认路径，理由是性价比不成立：+5.5MB 第三方二进制（KasmVNC 派生，**需先核对许可证**）、对宿主 Mesa/llvmpipe 的隐式依赖（宿主升级即可能失效）、一个常驻 X server 进程，换 ~3s。改造方案（启停脚本、`join-groups`、`DISPLAY` 传递、降级逻辑、增量体积、元数据同步）已写在 `IMPL.md`「偏差 5 改造方案」，待批准后再实施。
+~~不把这个能力做进默认路径~~ —— 第二轮改造已落地，形态与最初设想不同：**二进制不随包携带**（KasmVNC 是 GPL-2.0 强 copyleft，且依赖 `libxfont2`/`libpixman-1-0`/`libunwind8`/`libwebp7`/`libxshmfence1` 等独立 deb），改由运维把 `Xkasmvnc`（+x）投放到 `$TRIM_PKGVAR/runtime/xserver/`。默认 `gpu: 'auto'`：检测到「支持 `-hw3d` 的 X server + `renderD128` 可读写」就上 `-gpu host`，否则安静回落 `off`（与旧版行为一致）；`-gpu host` 启动失败还会自动 `-gpu off` 重试一次。**包体积零增量**，`join-groups` 追加 `render`、`video`。
+
+改造后本机复测（4 组配对，冷启动）：`off` 中位 **23843ms** → `host` 中位 **20979ms**，**−2864ms（−12.0%）**。实施细节与两个真机坑（`Xkasmvnc` 硬编码相对 `.xkbbin/xkbcomp`；X 被信号杀掉遗留 lock 导致「Cannot establish any listening sockets」）见 `IMPL.md`「偏差 5 改造方案（已实施）」。
 
 ### 一条方法论教训
 
 用 `setsid … &` 把模拟器丢后台再测，包用户下**必崩**；同一条命令前台跑、或由 Node `spawn()` 拉起则**正常**。初版「包用户下 `-gpu host` 必崩」的结论就是这个测试形态造成的假象，白花了大量时间在权限上。**结论：验收必须走产品真实启动路径，手工命令行只能用于单点排查。**
 
-### 目标机已复原
+### 目标机当前状态（v0.2 改造后）
 
-`hw.gpu.enabled=no` / `hw.gpu.mode=off`；包用户组恢复为 `920(apkstart-fnos),992(all.editor)`；`/dev/dma_heap/system`、`/dev/udmabuf`、`/dev/vhost-*` 权限恢复 `0660`；`runtime/xserver/`、临时 X socket、`multiinstance.lock` 全部清除，无残留进程。
+`settings.json` 的 `emulator.gpu` = `auto`、`xserverPath` = `""`；包用户组 `920(apkstart-fnos),44(video),105(render),992(all.editor)`；`$TRIM_PKGVAR/runtime/xserver/Xkasmvnc` 已投放（运维侧动作，非包内文件）；`/tmp/.X9-lock` 与 `:9` socket 在 `stop()` 后不再残留（只剩宿主自己的 `X99`）；无残留 qemu / X server 进程。
 
 ---
 

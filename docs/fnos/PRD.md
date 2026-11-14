@@ -199,7 +199,7 @@ $TRIM_PKGTMP/
 
 - 服务以 `run-as: package` 的 package 用户运行，**不要求 root**。
 - **硬件加速依赖**：`/dev/kvm` 属组为 `all.editor`（`crw-rw---- root all.editor`），由 `config/privilege` 的 `join-groups:["all.editor"]` 授予；进组后 `KVM_WRITABLE` 通过、`-accel on` 生效。目标机 `kvm:x:104` 组存在但为空、与设备无关，**不要加 `kvm` 组**。运行时仍需检测，未生效则降级 `-accel off`（TCG）。
-- **图形栈依赖**：默认 `-gpu off` 纯软件渲染（开机 30.9~31.3s）。**这不是权限决定的**：给包用户 `render`+`video` 组、再提供一个带硬件 3D 的 X display 后，包用户 `-gpu host` 可正常开机（`Mesa Intel (ADL-N)`，27.6~28.6s）。卡点在于宿主唯一支持 `-hw3d` 的 X server 是 KasmVNC 的 `Xkasmvnc`（不在 PATH、需随包携带 5.5MB），且净收益只有 ~3s（-10.6%），故不作为默认。无 `DISPLAY` 时 `-gpu host` / `swiftshader_indirect` 会 2s 内 `QEMU main loop exits abnormally with code 1`。详见 IMPL「偏差 5 更正」。
+- **图形栈依赖**：默认 `gpu: 'auto'`——检测到「支持 `-hw3d` 的 X server + `renderD128` 可读写」就用 `-gpu host`（实测 −2.86s / −12.0%），否则纯软件 `-gpu off`（开机 ~23.8s）。**权限早已不是瓶颈**（`join-groups` 已含 `render`/`video`），唯一门槛是宿主有没有带硬件 3D 的 X display：唯一支持 `-hw3d` 的是 KasmVNC 的 `Xkasmvnc`，因 GPL-2.0 与 deb 依赖**不随包携带**，由运维投放到 `$TRIM_PKGVAR/runtime/xserver/`。无 `DISPLAY` 时 `-gpu host` / `swiftshader_indirect` 会 2s 内 `QEMU main loop exits abnormally with code 1`，故裁决层强制校验 `DISPLAY`。详见 IMPL「偏差 5 改造方案（已实施）」。
 - 停止语义：`cmd/main stop` → 停服务 → `adb emu kill` → 等 30 秒 → 强杀残留 emulator/qemu 进程。
 
 ---

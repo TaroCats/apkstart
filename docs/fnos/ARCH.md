@@ -13,7 +13,7 @@
 - 技术栈：**Node.js 22 + 原生 HTML/CSS/JS，零第三方运行时依赖**。
 - 后端单进程，端口 **8890**，监听 `0.0.0.0`；adb server 与 emulator console **只绑 `127.0.0.1`**。
 - 解析层 `core/{zip,axml,arsc,apk,png}.js` **原样复制，不改逻辑**。
-- 单实例共享一台模拟器跑多应用（Q3）；在线包，不含运行时二进制（Q2）；P0 不做鉴权（Q1）；`config/privilege` 声明 `join-groups:["all.editor"]` 即获得 `/dev/kvm`（该设备属组为 `all.editor`），运行时仍检测 KVM 可写性（Q4）；图形渲染默认 `-gpu off`——**不是因为权限拒绝**（实测包用户可拿到 `renderD128` 并 `-gpu host`），而是因为宿主缺少「带硬件 3D 的 X display」（唯一支持 `-hw3d` 的 `Xkasmvnc` 不在宿主 PATH，随包携带的收益仅 ~3s，不划算），详见 IMPL 偏差 5 更正（Q4）；`maintainer` 保留 `RoutineMiku`、`distributor: TaroCats`（Q5）。
+- 单实例共享一台模拟器跑多应用（Q3）；在线包，不含运行时二进制（Q2）；P0 不做鉴权（Q1）；`config/privilege` 声明 `join-groups:["all.editor","render","video"]` 即获得 `/dev/kvm`（属组 `all.editor`）与 `/dev/dri/renderD128`（属组 `render`）读写权，运行时仍检测可写性（Q4）；图形渲染默认 `gpu: 'auto'`——**权限早已不是瓶颈**，唯一门槛是宿主有没有「带硬件 3D 的 X display」（只有 `Xkasmvnc` 支持 `-hw3d`）；因 GPL-2.0 与其 deb 依赖，二进制**不随包携带**，由运维投放到 `$TRIM_PKGVAR/runtime/xserver/`，投放了就自动上 `-gpu host`（实测 −2.86s / −12.0%），没投放就安静回落 `off`，详见 IMPL 偏差 5 改造方案（Q4）；`maintainer` 保留 `RoutineMiku`、`distributor: TaroCats`（Q5）。
 
 ---
 
@@ -121,7 +121,9 @@ flowchart LR
 | `server/service/store.js` | N（改自上游 store.js） | `apps.json`/`settings.json` 读写，路径取数据根 `$TRIM_PKGVAR`（回退 `$TRIM_APPDATA` → `$HOME/.apkstart`） | 160 |
 | `server/service/kvm.js` | N | `checkKvmAccess()`：`/dev/kvm` 存在性 + 可写性 + 组检测 | 70 |
 | `server/service/provision.js` | N | `Provision` 类：下载 platform-tools/emulator/system-image，续传+SHA+解压，进度事件 | 300 |
-| `server/service/emulator.js` | N | `EmulatorManager`：AVD 创建、启动参数、boot_completed 等待、stop/kill、日志环形缓冲 | 280 |
+| `server/service/emulator.js` | N | `EmulatorManager`：AVD 创建、启动参数、boot_completed 等待、stop/kill、日志环形缓冲、`_prepareGpu()` 与 `-gpu off` 降级重试 | 470 |
+| `server/service/gpu.js` | N | 纯函数 `resolveGpuMode()`：`off`/`auto`/显式模式三路裁决，`NEEDS_DISPLAY` 覆盖所有非 `off` 模式；返回 `{mode, want, reason, message}` 供接口与日志解释 | 80 |
+| `server/service/xserver.js` | N | `XServer`：探测支持 `-hw3d` 的 `Xkasmvnc`（不随包携带）、槽位 9~12 拉起、就绪+存活复核、`cleanStaleDisplay()` 清陈旧 lock/socket、`ensureXkbRoot()` 造 xkbcomp 软链、`stop()` 收尾 | 520 |
 | `server/service/engine.js` | N | `Engine`：ensureAdb、状态聚合、screencap 健康检查、状态机 | 210 |
 | `server/service/installer.js` | N | `Installer`：install→start→存活观察→闪退重试→写 store | 180 |
 | `server/service/paths.js` | N | 由 config.js 拆出的 `PATHS` 纯对象（供 store/service 依赖注入，避免循环依赖） | 60 |
@@ -155,7 +157,7 @@ flowchart LR
 | `fnos/cmd/upgrade_callback` | N | 升级后：迁移旧数据、`cmd/main start` 复启 | 30 |
 | `fnos/cmd/config_init` | N | 配置变更前：停服务（占位） | 20 |
 | `fnos/cmd/config_callback` | N | 配置变更后：重启服务以使 settings 生效 | 20 |
-| `fnos/config/privilege` | N | JSON：`{"defaults":{"run-as":"package"},"username":"apkstart-fnos","groupname":"apkstart-fnos","join-groups":["all.editor"]}` | 12 |
+| `fnos/config/privilege` | N | JSON：`{"defaults":{"run-as":"package"},"username":"apkstart-fnos","groupname":"apkstart-fnos","join-groups":["all.editor","render","video"]}` | 12 |
 | `fnos/config/resource` | N | JSON：`{"port":8890,"memory_mb":4096,"description":"KVM 无头 Android 运行时"}`（4096 为声明上限，非进程 `-memory`） | 15 |
 | `fnos/wizard/install` | N | 可选：安装向导（首启提示在线下载运行时） | 20 |
 | `fnos/wizard/uninstall` | N | 可选：卸载选项（保留 runtime/avd，P1-9 扩展位） | 20 |
@@ -212,7 +214,9 @@ flowchart LR
     "abi": "x86_64",
     "memoryMB": 2048,          // 0=自动（按机器内存，cap 4096）
     "cores": 2,                // 0=自动（min(4, 物理核/2)）
-    "gpu": "off",              // Q4：无宿主 GPU 访问权，强制纯软渲染（swiftshader → QEMU code 1）
+    "gpu": "auto",             // auto|off|host|swiftshader_indirect…；auto = 有 -hw3d 的 X server + renderD128 就上 host，否则回落 off
+    "gpuAutoEnable": true,     // false = 保留 auto 语义但禁止自动开（只认显式配置）
+    "xserverPath": "",         // 空=自动探测；显式指定Xkasmvnc路径（不存在则告警并回退）
     "idleShutdownMinutes": 0   // 0=不自动关机（P2-3 扩展位）
   },
   "runtime": { "baseUrl": "https://dl.google.com/android/repository" } // 可覆盖下载源
@@ -357,7 +361,8 @@ sequenceDiagram
   end
   E->>E: ensureAvd()  // avdmanager 缺失则手写 config.ini/hardware-qemu.ini
   E->>E: checkKvm → accel=on|off
-  E->>Q: spawn emulator -avd apkstart -no-window -no-audio -gpu off -accel on -port 5554
+  E->>X: _prepareGpu() → XServer.ensureStarted()（仅当裁决为非 off）
+  E->>Q: spawn emulator -avd apkstart -no-window -no-audio -gpu <裁决> -accel on -port 5554
   E->>A: new AdbClient({serial:"127.0.0.1:5554"})
   E->>A: wait-for-device (轮询 adb devices)
   loop 每 1s 至 180s
@@ -445,7 +450,7 @@ function buildArgs({ avdName, port, memMB, cores, kvmWritable, gpu }) {
   return [
     '-avd', avdName,
     '-no-window', '-no-audio', '-no-boot-anim',
-    '-gpu', gpu || 'off',     // Q4：无 GPU 访问权 → 纯软渲染（勿用 swiftshader_indirect）
+    '-gpu', gpu || 'off',     // 由 service/gpu.js 裁决：有 X display + renderD128 才是 host，否则 off
     '-accel', accel,
     '-port', String(port || 5554),
     '-no-snapshot-save',      // P1-4 前不依赖快照
@@ -457,7 +462,9 @@ function buildArgs({ avdName, port, memMB, cores, kvmWritable, gpu }) {
 ```
 emulator console 绑定 `127.0.0.1:5554+`（emulator 默认只监听 localhost）。
 
-> **Q4 实测结论（目标机 10.31.0.4 现场核实）**：`/dev/kvm` 属组为 `all.editor`（该机 `kvm:x:104` 组存在但为空、与设备无关），`config/privilege` 的 `join-groups:["all.editor"]` 使包用户进入该组后 `KVM_WRITABLE` 校验通过、模拟器正常起；**无需任何本地 `usermod` 脚本**。图形部分：**早先「包用户不可得 `renderD128`，故只能 `-gpu off`」的结论已证伪**——把包用户加入 `render`+`video`，并给一个 `Xkasmvnc :9 -hw3d -drinode /dev/dri/renderD128 -interface 127.0.0.1` 的 display 后，包用户 `-gpu host` 正常开机（`Mesa Intel (ADL-N)`，`bootMs` 27.6~28.6s），qemu 以 uid 926 持有 6 个 `renderD128` fd；root 身份结果相同，故与身份无关。但**只有 `Xkasmvnc` 支持 `-hw3d`**（宿主 `/usr/bin/Xvnc` 是 TigerVNC、`Xvfb` 也不支持），且它只存在于别的应用命名空间；无 `DISPLAY` 时 `EGL_PLATFORM=surfaceless` 直接 `Failed to get EGL display`。综合 +5.5MB 第三方二进制与 ~3s 收益，**默认仍取 `-gpu off`**。完整矩阵与改造方案见 IMPL「偏差 5 更正」。
+> **Q4 实测结论（目标机 10.31.0.4 现场核实）**：`/dev/kvm` 属组为 `all.editor`（该机 `kvm:x:104` 组存在但为空、与设备无关），`config/privilege` 的 `join-groups:["all.editor","render","video"]` 使包用户进入这些组后 `KVM_WRITABLE` 校验通过、模拟器正常起；**无需任何本地 `usermod` 脚本**。图形部分：**早先「包用户不可得 `renderD128`，故只能 `-gpu off`」的结论已证伪**——把包用户加入 `render`+`video`，并给一个 `Xkasmvnc :9 -hw3d -drinode /dev/dri/renderD128 -interface 127.0.0.1` 的 display 后，包用户 `-gpu host` 正常开机，qemu 以 uid 926 持有 6 个 `renderD128` fd。但**只有 `Xkasmvnc` 支持 `-hw3d`**（宿主 `/usr/bin/Xvnc` 是 TigerVNC、`Xvfb` 也不支持），且它只存在于别的应用命名空间；无 `DISPLAY` 时 `EGL_PLATFORM=surfaceless` 直接 `Failed to get EGL display`。
+>
+> **落地形态（v0.2）**：二进制**不随包携带**（KasmVNC 是 GPL-2.0 + 一串 deb 依赖），由运维投放到 `$TRIM_PKGVAR/runtime/xserver/`；`service/xserver.js` 按需拉起并在 `stop()` 收尾，`service/gpu.js` 做纯函数裁决（`off`/`auto`/显式模式三路，`NEEDS_DISPLAY` 覆盖所有非 `off` 模式），启动失败还会自动用 `-gpu off` 重试一次。默认 `gpu: 'auto'`：投放了二进制就吃到 **−2.86s（−12.0%，中位 23843→20979ms）**，没投放就与旧版完全一致。完整矩阵见 IMPL「偏差 5 更正」与「偏差 5 改造方案（已实施）」。
 
 ### 5.3 ARM-only 检测（`api/apk.js` / `installer.js`）
 
@@ -479,7 +486,7 @@ function isArmOnly(abis) {
    `avdmanager create avd -n <name> -k "system-images;android-34;google_apis;x86_64" -d pixel --force`。
 4. **avdmanager 缺失时手写**（在线包通常不含 cmdline-tools）：
    - `<name>.ini`：`avd.ini.encoding=UTF-8`、`path=$TRIM_PKGVAR/avd/<name>.avd`、`target=android-34`
-   - `<name>.avd/config.ini`：`image.sysdir.1=system-images/android-34/google_apis/x86_64/`、`abi.type=x86_64`、`hw.cpu.arch=x86_64`、`tag.id=google_apis`、`hw.lcd.width=1080`、`hw.lcd.height=1920`、`hw.lcd.density=420`、`hw.ramSize=<memMB>`、`disk.dataPartition.size=4G`、`hw.gpu.enabled=no`、`hw.gpu.mode=off`（Q4：无 GPU 访问权，纯软渲染）
+   - `<name>.avd/config.ini`：`image.sysdir.1=system-images/android-34/google_apis/x86_64/`、`abi.type=x86_64`、`hw.cpu.arch=x86_64`、`tag.id=google_apis`、`hw.lcd.width=1080`、`hw.lcd.height=1920`、`hw.lcd.density=420`、`hw.ramSize=<memMB>`、`disk.dataPartition.size=4G`、`hw.gpu.enabled=<裁决为 off ? no : yes>`、`hw.gpu.mode=<裁决结果>`（**必须与命令行 `-gpu` 一致**；早期写死 `swiftshader_indirect` 造成两者自相矛盾，已修）
    - `<name>.avd/hardware-qemu.ini`：由 emulator 首启自动生成，无需手写（手写会缺字段导致启动失败——**只写 config.ini 即可**）。
 
 ### 5.5 系统镜像与组件解压（`service/provision.js`）
@@ -568,7 +575,7 @@ depend=nodejs
 
 ```json
 // privilege
-{"defaults":{"run-as":"package"},"username":"apkstart-fnos","groupname":"apkstart-fnos","join-groups":["all.editor"]}
+{"defaults":{"run-as":"package"},"username":"apkstart-fnos","groupname":"apkstart-fnos","join-groups":["all.editor","render","video"]}
 ```
 ```json
 // resource

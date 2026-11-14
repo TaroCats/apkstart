@@ -153,10 +153,9 @@ disable_authorization_path=true
 3. `fnos/cmd/main` 的 `health_ok()` 解析响应体（64KB 上限），要求 `statusCode===200` **且** `body.app==='apkstart-fnos'` **且** `body.pid === $(read_pid)`（同时防上一次残留实例被误认）。任一不满足 → 返回 1。
 4. `do_start()` 轮询循环里，若进程在健康检查通过前就退出 → 立即判失败并 `tail -n 20` 回显日志尾部到 stderr（第一屏就能看到真正的失败原因），`return 1`；不再继续空等 20s，也不再打印误导性的「超时」文案。
 
-### 偏差 5 — 默认 `-gpu off`（宿主侧 GL 需要「硬件 3D 的 X server」，本包不自带故降级），且软件 CPU 模拟不可用
+### 偏差 5 — GPU 加速：默认 `auto`（有「硬件 3D 的 X server」就开，没有就回落 `off`）；软件 CPU 模拟仍不可用
 
-> **本节结论已被后续实测更正（原结论「包用户拿不到 renderD128 所以必然 `-gpu off`」是错的）。**
-> 更正后的完整实测矩阵见下方「偏差 5 更正」。默认值仍保持 `off`，但理由从「权限决定论」变成「宿主缺一个带硬件 3D 的 X server，且为 3s 收益引入 5.5MB 第三方二进制的性价比不足」。
+> **本节结论经两轮更正。** 初版「包用户拿不到 renderD128，所以必然 `-gpu off`」是错的（权限已通过 `join-groups: render,video` 解决，且根因其实是宿主缺一个带硬件 3D 的 X display）。第二轮把 ~3s 收益做成了可选能力：**默认 `gpu: 'auto'`**，检测到支持 `-hw3d` 的 X server 且 `renderD128` 可读写就上 `-gpu host`，否则安静回落 `off`（与旧版行为一致）。完整实测矩阵、实施方案与两个真机坑见下方「偏差 5 更正」与「偏差 5 改造方案（已实施）」。
 
 **真机证据（初版）**：
 
@@ -195,26 +194,64 @@ disable_authorization_path=true
 
 **方法论教训（花了最多时间的一条）**：用 `setsid … &` 把模拟器丢后台后再测，包用户下**必崩**；同一条命令前台跑 / 由 Node `spawn()` 拉起则**正常**。初版结论「包用户下 `-gpu host` 必崩」是这个测试形态造成的假象。**结论：验收必须走产品真实启动路径（服务 → spawn），手工命令行只能用于单点排查。**
 
-**是否随包自带 X server**：结论是**暂不做**。代价是 +5.5MB 第三方二进制（KasmVNC 派生，需先核对许可证）、对宿主 Mesa/llvm 的隐式依赖（宿主升级即可能失效）、一个常驻 X server 进程，换 ~3s。默认保持 `-gpu off`；若后续要做，按「偏差 5 改造方案」执行。
+**是否随包自带 X server**：结论是**不自带，只探测**。两个硬理由：① `Xkasmvnc` 是 KasmVNC 1.4.0 / **GPL-2.0**（强 copyleft），随 MIT 包分发需附源码或书面要约；② 它 `ldd` 依赖 `libxfont2`/`libpixman-1-0`/`libunwind8`/`libwebp7`/`libxshmfence1` 等独立 deb，干净 fnOS 未必齐备。改为由运维把二进制投放到 `$TRIM_PKGVAR/runtime/xserver/`（升级不丢），包体积零增量。默认 `gpu: 'auto'`：投放了就自动吃到 ~2.9s 收益，没投放就回落 `off`。详见「偏差 5 改造方案（已实施）」。
 
 **附带结论（不改进代码，仅记录）**：此版本 emulator **拒绝 `-accel off`**，需 `ANDROID_I_WANT_MY_TCG=yes` 才允许纯软件 CPU 模拟。因此本移植版**强依赖 `/dev/kvm` 可读写**（即包用户属于 `kvm` 组，且安装时 `all.editor` 权限授予到位）。无 KVM 时 `-accel off` 会立即失败，前端 `kvm.writable=false` 的红条警告依旧有效。
 
-#### 偏差 5 改造方案（未实施，待批准）
+#### 偏差 5 改造方案（已实施，v0.2 起默认 `gpu: 'auto'`）
 
-若要把 ~3s 的 GPU 收益做成可选能力，改动面如下（不改变默认行为）：
+把 ~3s 的 GPU 收益做成了**可选能力**：默认 `auto`（能自动检测就开），检测不到就静默回落 `off`，行为与旧版一致。
 
-1. **随包携带 X server**：`fnos/` 下新增 `runtime/xserver/Xkasmvnc`（5.5MB）。**前置动作是先核对 KasmVNC 许可证**是否允许随闭源包分发；不允许则改为「检测到宿主已有带 `-hw3d` 的 X server 才启用」。
-2. **启停脚本**：`fnos/cmd/main` 的 `do_start()` 在起服务前拉起 X server，`do_stop()` 收尾时杀掉：
-   ```
-   $TRIM_PKGVAR/runtime/xserver/Xkasmvnc :9 -hw3d -drinode /dev/dri/renderD128 \
-     -geometry 1080x1920 -depth 24 -SecurityTypes None -disableBasicAuth \
-     -interface 127.0.0.1 -rfbport 5996 -websocketPort 6996 -NeverShared
-   ```
-   必须带 `-interface 127.0.0.1`（见上），且 `-SecurityTypes None` 时只绑回环，避免把无鉴权 VNC 暴露到局域网。
-3. **`DISPLAY` 传递**：`emulator.js` 的 `_spawnEnv()` 增加 `DISPLAY: ':9'`（仅当 X server 就绪）。
-4. **权限**：`fnos/config/privilege` 的 `join-groups` 追加 `render`、`video`（`render` 供 `renderD128`，`video` 供 `card0`，缺 `card0` 时 X server 会刷 `libEGL warning: failed to open /dev/dri/card0: Permission denied`，虽不致命但会退化）。**注意**：目标机 `render`/`video` 组必须存在，缺失时需在安装脚本里兜底。
-5. **降级逻辑**（必须）：`-gpu host` 只在「X server 已就绪 **且** `renderD128` 可读写」时使用；否则回退 `off`。当前 `_effectiveGpu()` 只校验 `renderD128`，**没有校验 `DISPLAY`**——这是已知缺陷，实施本方案时必须一并补上，否则没有 X 的机器上用户一改设置就是 2 秒静默崩溃。
-6. **打包与元数据**：包体积 +5.5MB，`fnpack.json` 的 `size` / `sha256` / `updated_at` 必须同步更新，并升版本号。
+**实测收益（10.31.0.4，同一 AVD、冷启动、交替 4 组配对）**：
+
+| 组 | `-gpu off` bootMs | `-gpu host` bootMs | 差值 |
+|----|------------------|--------------------|------|
+| 1 | 24744 | 21453 | −3291 |
+| 2 | 22872 | 20575 | −2297 |
+| 3 | 23835 | 20505 | −3330 |
+| 4 | 23851 | 21503 | −2348 |
+
+中位数 off `23843ms` → host `20979ms`，**−2864ms（−12.0%）**；均值 −11.8%。qemu 稳定持有 6 个 `renderD128` fd，适配器 `Mesa Intel(R) Graphics (ADL-N)`，`OpenGL ES 3.0 (4.6 Core Profile Mesa 26.1.6)`，日志 `Ok: Hardware GPU requirements ... are passed`。
+
+**落地形态与最初设想的 4 处偏差**：
+
+1. **不自带二进制（原方案第 1 步推翻）**。`Xkasmvnc` 是 **KasmVNC 1.4.0 / GPL-2.0**（强 copyleft），随 MIT 包分发需附源码或书面要约；且 `ldd` 显示依赖 `libxfont2` / `libpixman-1-0` / `libunwind8` / `libwebp7` / `libxshmfence1` 等独立 deb 包，干净 fnOS 未必齐备。**改为只探测、不携带**：二进制由运维投放到 `$TRIM_PKGVAR/runtime/xserver/Xkasmvnc`（升级不丢），`locate()` 按 `settings.xserverPath` → `APKSTART_XSERVER` → 数据根 → 代码根 → `PATH` 依次尝试，非显式来源必须是真支持 `-hw3d` 的二进制（`-help` 输出同时含 `-hw3d` 与 `-drinode`）。包体积**零增量**。
+2. **不在 `cmd/main` 里起 X server（原方案第 2 步调整）**。改由 `server/service/xserver.js` 在 `start()` 内部按需拉起、`stop()` 收尾时 `SIGTERM`+`SIGKILL`，且**只在真要开 GPU 时才起**——`daemon` 常驻一个没人用的 X server 是纯浪费。
+3. **权限**：`fnos/config/privilege` 的 `join-groups` 由 `["all.editor"]` 改为 `["all.editor","render","video"]`（`render` 供 `renderD128`，`video` 供 `card0`）。目标机实测用户组变为 `920,44(video),105(render),992`。
+4. **降级逻辑补齐（原方案第 5 步）**：新增 `server/service/gpu.js` 做纯函数裁决，`NEEDS_DISPLAY` 覆盖 `host/angle_indirect/guest/mesa/swiftshader_indirect/swiftshader`——**旧 `_effectiveGpu()` 只校验 `renderD128`、不校验 `DISPLAY`** 的缺陷已修。另外补了「开了还起不来」的兜底：`-gpu <非 off>` 启动失败时 `stop()` + `xserver.stop()` 后用 `-gpu off` 重试一次，`gpu.reason` 记 `fallback-after-failure`。
+
+**真机又踩出来的两个坑（原方案里完全没预料到，也是最花时间的部分）**：
+
+- **坑 1：该二进制硬编码相对路径 `.xkbbin/xkbcomp`。** 它是被补丁过的 KasmVNC，键盘编译器从**相对路径**解析，不看 `PATH`——宿主 `/usr/bin/xkbcomp` 明明存在也没用，`-xkbdir` 也救不了：
+  ```
+  sh: 1: .xkbbin/xkbcomp: not found
+  XKB: Failed to compile keymap
+  (EE) Fatal server error: Failed to activate virtual core keyboard: 2
+  ```
+  表现是「X 起来 1 秒就死」，然后 qemu 报 `Failed to open display 0 / Failed to get EGL display`。
+  我们只投放裸二进制（vendor 的 `.xkbbin/` 私有目录不适合分发），所以 `ensureXkbRoot()` 在 `$TRIM_PKGTMP/xkbroot/.xkbbin/xkbcomp` 造一个指向宿主真实 `xkbcomp` 的**软链**，并把 cwd 设到 `xkbroot`。实测有此软链时 X server 稳定存活。若二进制自带 `.xkbbin/`，`pickXkbBinCwd()` 优先用它的打包根。
+- **坑 2：X 被信号杀掉会遗留 `/tmp/.XN-lock` + socket。** 一次异常退出后，后续**所有**启动都报
+  `Fatal server error: Cannot establish any listening sockets - Make sure an X server isn't already running`，
+  四个槽位（:9/:10/:11/:12）全部失败 → `auto` 永久退化成 `off`（第一轮 A/B 就是这样测出 `MODE=auto gpu=off` 的假数据）。
+  `cleanStaleDisplay()` 按「lock 里的 pid 是否活着 **且** 命令行像不像 X server」判定：真占用 → 换槽位；否则删 lock+socket。`stop()` 收尾也会清自己那个 display。
+
+**正确性细节（均为真机验证过的必要条件）**：
+
+- 命令行**必须**带 `-interface 127.0.0.1`，否则 `vncExtInit: failed to bind socket ... Address already in use (98)`（卡的是 **websocketPort**，简写日志把前半句截掉了，极易误判成 display 编号冲突）。
+- `-SecurityTypes None` 只在绑定回环时使用，避免把无鉴权 VNC 暴露到局域网。
+- **就绪判定必须带存活复核**：socket 出现过 ≠ 就绪（XKB fatal 就是「起来后立刻死」）。实现为「`vncext: Listening` 出现 → `sleep(600)` → 复核 `!exited && isReady()`」，且 `isReady()` 额外校验 `child.exitCode === null`；`parseFatalError()` 让 fatal 立刻失败而不是傻等满 10s。
+- 观测接口：`GET /api/status` 新增 `gpu: {mode, want, reason, message}` 与 `xserver: {available, bin, source, hw3d, display, running}`，让「我配了 host 为什么是 off」在接口里可解释；启动日志也保留 `[gpu]` / `[xserver]` 决策行（含「配置的 xserverPath 不可用，已改用 …」告警）。
+
+**降级实测（10.31.0.4）**：
+
+| 场景 | 结果 |
+|------|------|
+| `xserverPath` 指向不存在的文件 | 自动回退到数据根二进制，`reason=auto-host`，日志有「配置的 xserverPath 不可用」告警，正常 `-gpu host` |
+| `xserverPath=/bin/true`（不支持 `-hw3d`） | `available=false`、`reason=no-xserver`、`mode=off`，模拟器正常启动（bootMs 25018） |
+| `-gpu host` 已开但启动失败 | 自动 `-gpu off` 重试成功，`reason=fallback-after-failure`（bootMs 31862） |
+| 无 `renderD128` 权限 / 无 X server | 直接 `off`，不再有 2 秒静默崩溃 |
+
+**运维须知**：想开 GPU 只需把 `Xkasmvnc`（+x）放到 `$TRIM_PKGVAR/runtime/xserver/`（默认 `/vol2/@appdata/apkstart-fnos/runtime/xserver/`）；不投放则 `auto` 安静地回落 `off`，功能不受影响。`gpu: 'off'` 可显式关闭，`gpuAutoEnable: false` 可保留 `auto` 语义但禁止自动开启。
 
 ### 偏差 6 — 专用 adb server 端口 5044 + device serial 必须是 `emulator-5554`
 
@@ -656,8 +693,15 @@ app/ui/config: {".url":{"apkstart-fnos.main":{...,"type":"url","port":"8890","ur
   Activity 栈采不到时退化到窗口焦点、**第一次采样必须是 window 焦点**、
   命中弹窗后不再多打一次 dumpsys、焦点采样抛错时兜住仍用 Activity 栈返回应用
 
-[fnos-unit] 结果：39 通过，0 失败
-npm test 全链：run-tests 39 + engine-test 24 + auto-test 3 + fnos-unit 39 = 105 通过，0 失败
+[xserver.js / 硬件 3D X display] 16 条：`-interface 127.0.0.1` 必带、`-hw3d`/`-drinode` 必带、
+  `-SecurityTypes None` 只绑回环、display 首参、`parseDisplayNum`/`socketPathFor`/`parseReadyLog`/`parseBindConflict`、
+  `-xkbdir` 透传与 `pickXkbDir` 优先级、`pickXkbBinCwd` 找打包根、`findXkbcompBin`、`ensureXkbRoot` 造 xkbcomp 软链、
+  `cleanStaleDisplay` 清死 lock / 不被 pid 复用卡死、`parseFatalError`
+[gpu.js / -gpu 模式裁决] 9 条：off、auto+全齐→host、auto 无 X→off、auto 无 render node→off、
+  显式 host 无 X 降级、显式 swiftshader 无 X 也降级、显式 host 齐全尊重、gpuAutoEnable=false、未知模式回落
+
+[fnos-unit] 结果：64 通过，0 失败
+npm test 全链：run-tests 39 + engine-test 24 + auto-test 3 + fnos-unit 64 = 130 通过，0 失败
 ```
 
 ---
