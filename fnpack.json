@@ -28,6 +28,17 @@
       "is_docker": false,
       "service_port": "8890",
       "releases": {
+        "0.2.2": {
+          "changelog": "0.2.2：修 App Center 装不上（code 10107）—— fpk 根级的 app/ 目录改为根级 app.tgz（嵌套压缩包），平台只认后者。顺带修 cmd/main 的 adb 路径（应在数据根 runtime/ 而非代码根）、cmd/install_init 的 cmd 目录推导；新增 build/validate-package.js 产物结构校验，0.2.1 的真实日志形态已做成回归用例。0.2.0（wizard 坏）与 0.2.1（包结构坏）资产均不覆盖，装 0.2.2。",
+          "updated_at": "2026-11-14T05:55:53Z",
+          "packages": {
+            "x86": {
+              "download_url": "https://github.com/TaroCats/apkstart/releases/download/v0.2.2/apkstart-fnos_0.2.2_x86.fpk",
+              "sha256": "8b9a7f318bde97c8e085c1e9c709d237bbf75bdd37b55bed5f0018ee2b943e2a",
+              "size": 100452
+            }
+          }
+        },
         "0.2.1": {
           "changelog": "修复 App Center 安装失败（wizard invalid / 100610）：wizard/install 与 wizard/uninstall 的 JSON 顶层改为数组 []trimpkg.WizardPage（原先写成对象）；uninstall 向导改为说明数据保留策略（field 值不进脚本，不做假开关）；新增 build/validate-wizard.js 与 3 个单测做回归护栏",
           "updated_at": "2026-11-14T05:34:18Z",
